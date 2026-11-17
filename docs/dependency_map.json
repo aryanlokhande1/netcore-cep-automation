@@ -1,0 +1,3231 @@
+{
+  "app.approval": {
+    "path": "app/approval.py",
+    "imports": [
+      "dataclasses",
+      "hashlib",
+      "json",
+      "langgraph.types"
+    ],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "app.cli": {
+    "path": "app/cli.py",
+    "imports": [
+      "app.codex_reasoner",
+      "app.config",
+      "app.model",
+      "argparse",
+      "asyncio",
+      "dataclasses",
+      "deep_agents.controller",
+      "deep_agents.schemas",
+      "deep_agents.teacher_replay",
+      "evals.fixture",
+      "json",
+      "learning.runner",
+      "learning.three_run",
+      "modules.login.evidence",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.workflow",
+      "os",
+      "pathlib",
+      "re",
+      "skills.procedure",
+      "skills.registry"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.codex_reasoner",
+      "app.config",
+      "app.model",
+      "deep_agents.controller",
+      "deep_agents.schemas",
+      "deep_agents.teacher_replay",
+      "evals.fixture",
+      "learning.runner",
+      "learning.three_run",
+      "modules.login.evidence",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.workflow",
+      "skills.procedure",
+      "skills.registry"
+    ]
+  },
+  "app.codex_reasoner": {
+    "path": "app/codex_reasoner.py",
+    "imports": [
+      "app.config",
+      "app.model",
+      "asyncio",
+      "json",
+      "os",
+      "pathlib",
+      "shutil",
+      "tempfile"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.model"
+    ]
+  },
+  "app.config": {
+    "path": "app/config.py",
+    "imports": [
+      "dataclasses",
+      "dotenv",
+      "os",
+      "pathlib",
+      "urllib.parse"
+    ],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "app.graph": {
+    "path": "app/graph.py",
+    "imports": [
+      "app.state",
+      "langgraph.checkpoint.memory",
+      "langgraph.graph",
+      "langgraph.types",
+      "modules.login.verifier"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.state",
+      "modules.login.verifier"
+    ]
+  },
+  "app.model": {
+    "path": "app/model.py",
+    "imports": [
+      "app.config",
+      "asyncio",
+      "json",
+      "openai",
+      "os",
+      "pydantic",
+      "typing"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config"
+    ]
+  },
+  "app.model_settings": {
+    "path": "app/model_settings.py",
+    "imports": [
+      "app.config",
+      "dataclasses",
+      "dotenv",
+      "io",
+      "os",
+      "re"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config"
+    ]
+  },
+  "app.safety": {
+    "path": "app/safety.py",
+    "imports": [
+      "app.config",
+      "urllib.parse"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config"
+    ]
+  },
+  "app.state": {
+    "path": "app/state.py",
+    "imports": [
+      "enum",
+      "pydantic",
+      "typing"
+    ],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "app.trace": {
+    "path": "app/trace.py",
+    "imports": [
+      "app.state",
+      "datetime",
+      "json",
+      "pathlib",
+      "time",
+      "uuid"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.state"
+    ]
+  },
+  "app.whatsapp_baseline": {
+    "path": "app/whatsapp_baseline.py",
+    "imports": [
+      "app.config",
+      "app.model_settings",
+      "app.safety",
+      "app.trace",
+      "argparse",
+      "asyncio",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "dataclasses",
+      "deep_agents.models",
+      "deep_agents.permissions",
+      "json",
+      "learning.policies",
+      "modules.login.credentials",
+      "modules.login.evidence",
+      "modules.whatsapp.baseline_login",
+      "modules.whatsapp.browser_baseline",
+      "modules.whatsapp.browser_baseline_dom",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.login_handoff",
+      "modules.whatsapp.session",
+      "msvcrt",
+      "pathlib",
+      "select",
+      "skills.registry",
+      "sys",
+      "time",
+      "urllib.parse"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.model_settings",
+      "app.safety",
+      "app.trace",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "deep_agents.models",
+      "deep_agents.permissions",
+      "learning.policies",
+      "modules.login.credentials",
+      "modules.login.evidence",
+      "modules.whatsapp.baseline_login",
+      "modules.whatsapp.browser_baseline",
+      "modules.whatsapp.browser_baseline_dom",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.login_handoff",
+      "modules.whatsapp.session",
+      "skills.registry"
+    ]
+  },
+  "app": {
+    "path": "app/__init__.py",
+    "imports": [
+      "os"
+    ],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "browser.cdp_endpoint": {
+    "path": "browser/cdp_endpoint.py",
+    "imports": [
+      "urllib.parse"
+    ],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "browser.diagnostics": {
+    "path": "browser/diagnostics.py",
+    "imports": [
+      "app.config",
+      "app.safety"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.safety"
+    ]
+  },
+  "browser.discovery": {
+    "path": "browser/discovery.py",
+    "imports": [
+      "app.safety",
+      "asyncio",
+      "base64",
+      "browser.evidence_diagnostics",
+      "browser.readonly_cdp",
+      "collections",
+      "datetime",
+      "hashlib",
+      "json",
+      "modules.login.discovery",
+      "modules.login.evidence",
+      "pathlib",
+      "time",
+      "urllib.parse"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.safety",
+      "browser.evidence_diagnostics",
+      "browser.readonly_cdp",
+      "modules.login.discovery",
+      "modules.login.evidence"
+    ]
+  },
+  "browser.evidence_diagnostics": {
+    "path": "browser/evidence_diagnostics.py",
+    "imports": [
+      "app.config",
+      "app.state",
+      "pydantic"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.state"
+    ]
+  },
+  "browser.evidence_review": {
+    "path": "browser/evidence_review.py",
+    "imports": [
+      "app.safety",
+      "asyncio",
+      "browser.evidence_diagnostics",
+      "hashlib",
+      "json",
+      "modules.login.evidence",
+      "modules.login.verifier",
+      "msvcrt",
+      "pathlib",
+      "select",
+      "sys",
+      "time",
+      "urllib.parse"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.safety",
+      "browser.evidence_diagnostics",
+      "modules.login.evidence",
+      "modules.login.verifier"
+    ]
+  },
+  "browser.guard_state": {
+    "path": "browser/guard_state.py",
+    "imports": [
+      "asyncio",
+      "dataclasses"
+    ],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "browser.inspection": {
+    "path": "browser/inspection.py",
+    "imports": [
+      "asyncio",
+      "msvcrt",
+      "select",
+      "sys"
+    ],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "browser.lifecycle": {
+    "path": "browser/lifecycle.py",
+    "imports": [
+      "app.config",
+      "asyncio",
+      "pathlib",
+      "shutil"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config"
+    ]
+  },
+  "browser.live_dom": {
+    "path": "browser/live_dom.py",
+    "imports": [],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "browser.metadata_channel": {
+    "path": "browser/metadata_channel.py",
+    "imports": [
+      "asyncio",
+      "browser.cdp_endpoint",
+      "contextlib",
+      "httpx",
+      "json",
+      "urllib.parse",
+      "websockets",
+      "websockets.exceptions"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "browser.cdp_endpoint"
+    ]
+  },
+  "browser.navigation_guard": {
+    "path": "browser/navigation_guard.py",
+    "imports": [
+      "asyncio",
+      "browser.cdp_endpoint",
+      "browser.guard_state",
+      "httpx",
+      "json",
+      "time",
+      "urllib.parse",
+      "websockets"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "browser.cdp_endpoint",
+      "browser.guard_state"
+    ]
+  },
+  "browser.observed_control": {
+    "path": "browser/observed_control.py",
+    "imports": [
+      "browser.protected_tabs",
+      "modules.whatsapp.contract"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "browser.protected_tabs",
+      "modules.whatsapp.contract"
+    ]
+  },
+  "browser.owned_process": {
+    "path": "browser/owned_process.py",
+    "imports": [
+      "ctypes",
+      "subprocess",
+      "sys"
+    ],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "browser.protected_tabs": {
+    "path": "browser/protected_tabs.py",
+    "imports": [
+      "asyncio",
+      "dataclasses",
+      "json",
+      "urllib.parse",
+      "uuid"
+    ],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "browser.readonly_cdp": {
+    "path": "browser/readonly_cdp.py",
+    "imports": [
+      "asyncio",
+      "browser.cdp_endpoint",
+      "httpx",
+      "json",
+      "time",
+      "websockets"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "browser.cdp_endpoint"
+    ]
+  },
+  "browser.shadow_inventory": {
+    "path": "browser/shadow_inventory.py",
+    "imports": [
+      "asyncio",
+      "collections",
+      "hashlib",
+      "json",
+      "time",
+      "urllib.parse"
+    ],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "browser.stagehand_client": {
+    "path": "browser/stagehand_client.py",
+    "imports": [
+      "app.config",
+      "app.safety",
+      "app.state",
+      "asyncio",
+      "browser.lifecycle",
+      "browser.navigation_guard",
+      "browser.owned_process",
+      "json",
+      "modules.login.evidence",
+      "shutil",
+      "stagehand",
+      "stagehand.rpc_client",
+      "time",
+      "urllib.parse"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.safety",
+      "app.state",
+      "browser.lifecycle",
+      "browser.navigation_guard",
+      "browser.owned_process",
+      "modules.login.evidence"
+    ]
+  },
+  "browser": {
+    "path": "browser/__init__.py",
+    "imports": [],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "deep_agents.browser_tools": {
+    "path": "deep_agents/browser_tools.py",
+    "imports": [
+      "app.safety",
+      "app.state",
+      "asyncio",
+      "browser.live_dom",
+      "deep_agents.dom",
+      "json",
+      "langchain_core.tools",
+      "learning.policies",
+      "modules.login.verifier",
+      "typing",
+      "urllib.parse",
+      "uuid"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.safety",
+      "app.state",
+      "browser.live_dom",
+      "deep_agents.dom",
+      "learning.policies",
+      "modules.login.verifier"
+    ]
+  },
+  "deep_agents.controller": {
+    "path": "deep_agents/controller.py",
+    "imports": [
+      "app.config",
+      "app.model_settings",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "asyncio",
+      "browser.diagnostics",
+      "browser.discovery",
+      "browser.evidence_diagnostics",
+      "browser.evidence_review",
+      "browser.inspection",
+      "browser.stagehand_client",
+      "dataclasses",
+      "deep_agents.browser_tools",
+      "deep_agents.doer",
+      "deep_agents.live_tools",
+      "deep_agents.models",
+      "deep_agents.offline",
+      "deep_agents.permissions",
+      "deep_agents.review",
+      "deep_agents.schemas",
+      "deep_agents.teacher",
+      "evals.fixture",
+      "json",
+      "learning.autonomous",
+      "learning.policies",
+      "modules.login.credentials",
+      "modules.login.evidence",
+      "modules.login.policy",
+      "modules.login.review",
+      "modules.login.verifier",
+      "openai",
+      "pathlib",
+      "skills.registry",
+      "sys",
+      "time",
+      "uuid"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.model_settings",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "browser.diagnostics",
+      "browser.discovery",
+      "browser.evidence_diagnostics",
+      "browser.evidence_review",
+      "browser.inspection",
+      "browser.stagehand_client",
+      "deep_agents.browser_tools",
+      "deep_agents.doer",
+      "deep_agents.live_tools",
+      "deep_agents.models",
+      "deep_agents.offline",
+      "deep_agents.permissions",
+      "deep_agents.review",
+      "deep_agents.schemas",
+      "deep_agents.teacher",
+      "evals.fixture",
+      "learning.autonomous",
+      "learning.policies",
+      "modules.login.credentials",
+      "modules.login.evidence",
+      "modules.login.policy",
+      "modules.login.review",
+      "modules.login.verifier",
+      "skills.registry"
+    ]
+  },
+  "deep_agents.diagnostics": {
+    "path": "deep_agents/diagnostics.py",
+    "imports": [
+      "openai",
+      "pydantic"
+    ],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "deep_agents.doer": {
+    "path": "deep_agents/doer.py",
+    "imports": [
+      "app.safety",
+      "deep_agents.permissions",
+      "deep_agents.schemas",
+      "deepagents",
+      "deepagents.backends",
+      "langchain.agents.structured_output",
+      "langchain_core.tools",
+      "langgraph.checkpoint.memory",
+      "pathlib",
+      "skills.backend"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.safety",
+      "deep_agents.permissions",
+      "deep_agents.schemas",
+      "skills.backend"
+    ]
+  },
+  "deep_agents.dom": {
+    "path": "deep_agents/dom.py",
+    "imports": [],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "deep_agents.evidence": {
+    "path": "deep_agents/evidence.py",
+    "imports": [
+      "app.config",
+      "collections",
+      "deep_agents.review_contract",
+      "hashlib",
+      "json",
+      "os",
+      "re",
+      "tiktoken"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "deep_agents.review_contract"
+    ]
+  },
+  "deep_agents.live_tools": {
+    "path": "deep_agents/live_tools.py",
+    "imports": [
+      "app.safety",
+      "app.state",
+      "asyncio",
+      "browser.diagnostics",
+      "browser.live_dom",
+      "deep_agents.browser_tools",
+      "json",
+      "langchain_core.tools",
+      "modules.login.verifier",
+      "uuid"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.safety",
+      "app.state",
+      "browser.diagnostics",
+      "browser.live_dom",
+      "deep_agents.browser_tools",
+      "modules.login.verifier"
+    ]
+  },
+  "deep_agents.models": {
+    "path": "deep_agents/models.py",
+    "imports": [
+      "app.config",
+      "app.model_settings",
+      "deep_agents.telemetry",
+      "langchain_openai",
+      "os"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.model_settings",
+      "deep_agents.telemetry"
+    ]
+  },
+  "deep_agents.offline": {
+    "path": "deep_agents/offline.py",
+    "imports": [
+      "json",
+      "langchain_core.language_models.chat_models",
+      "langchain_core.messages",
+      "langchain_core.outputs",
+      "pydantic",
+      "typing",
+      "uuid"
+    ],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "deep_agents.permissions": {
+    "path": "deep_agents/permissions.py",
+    "imports": [
+      "app.config",
+      "dataclasses",
+      "deepagents",
+      "langchain.agents.middleware",
+      "langchain_core.messages"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config"
+    ]
+  },
+  "deep_agents.review": {
+    "path": "deep_agents/review.py",
+    "imports": [
+      "deep_agents.diagnostics",
+      "deep_agents.evidence",
+      "deep_agents.review_contract",
+      "deep_agents.teacher",
+      "langsmith",
+      "pydantic",
+      "time"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "deep_agents.diagnostics",
+      "deep_agents.evidence",
+      "deep_agents.review_contract",
+      "deep_agents.teacher"
+    ]
+  },
+  "deep_agents.review_contract": {
+    "path": "deep_agents/review_contract.py",
+    "imports": [
+      "pydantic",
+      "re",
+      "typing"
+    ],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "deep_agents.schemas": {
+    "path": "deep_agents/schemas.py",
+    "imports": [
+      "app.config",
+      "deep_agents.review_contract",
+      "pydantic",
+      "re",
+      "typing"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "deep_agents.review_contract"
+    ]
+  },
+  "deep_agents.teacher": {
+    "path": "deep_agents/teacher.py",
+    "imports": [
+      "deep_agents.permissions",
+      "deep_agents.review_contract",
+      "deep_agents.schemas",
+      "deepagents",
+      "deepagents.backends",
+      "langchain.agents.structured_output",
+      "langgraph.checkpoint.memory",
+      "pathlib"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "deep_agents.permissions",
+      "deep_agents.review_contract",
+      "deep_agents.schemas"
+    ]
+  },
+  "deep_agents.teacher_replay": {
+    "path": "deep_agents/teacher_replay.py",
+    "imports": [
+      "app.config",
+      "app.model_settings",
+      "app.state",
+      "app.trace",
+      "deep_agents.evidence",
+      "deep_agents.models",
+      "deep_agents.permissions",
+      "deep_agents.review",
+      "hashlib",
+      "json",
+      "modules.login.review",
+      "pathlib",
+      "re",
+      "uuid"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.model_settings",
+      "app.state",
+      "app.trace",
+      "deep_agents.evidence",
+      "deep_agents.models",
+      "deep_agents.permissions",
+      "deep_agents.review",
+      "modules.login.review"
+    ]
+  },
+  "deep_agents.telemetry": {
+    "path": "deep_agents/telemetry.py",
+    "imports": [
+      "deep_agents.evidence",
+      "deep_agents.permissions",
+      "deep_agents.review_contract",
+      "langchain_core.callbacks",
+      "langchain_openai",
+      "pydantic"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "deep_agents.evidence",
+      "deep_agents.permissions",
+      "deep_agents.review_contract"
+    ]
+  },
+  "deep_agents": {
+    "path": "deep_agents/__init__.py",
+    "imports": [],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "evals.fixture": {
+    "path": "evals/fixture.py",
+    "imports": [
+      "contextlib",
+      "http.cookies",
+      "http.server",
+      "json",
+      "threading",
+      "urllib.parse",
+      "uuid"
+    ],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "evals.local_baseline_login_handoff": {
+    "path": "evals/local_baseline_login_handoff.py",
+    "imports": [
+      "app.config",
+      "app.trace",
+      "app.whatsapp_baseline",
+      "browser.protected_tabs",
+      "contextlib",
+      "deep_agents.browser_tools",
+      "deep_agents.offline",
+      "deep_agents.permissions",
+      "evals.fixture",
+      "evals.local_browser_baseline",
+      "http.server",
+      "json",
+      "modules.whatsapp.browser_baseline",
+      "pathlib",
+      "threading",
+      "time",
+      "unittest.mock",
+      "urllib.parse"
+    ],
+    "literal_paths": [
+      "outputs/real-local-baseline-login-handoff.json"
+    ],
+    "local_imports": [
+      "app.config",
+      "app.trace",
+      "app.whatsapp_baseline",
+      "browser.protected_tabs",
+      "deep_agents.browser_tools",
+      "deep_agents.offline",
+      "deep_agents.permissions",
+      "evals.fixture",
+      "evals.local_browser_baseline",
+      "modules.whatsapp.browser_baseline"
+    ]
+  },
+  "evals.local_browser_baseline": {
+    "path": "evals/local_browser_baseline.py",
+    "imports": [
+      "app.config",
+      "app.trace",
+      "asyncio",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "contextlib",
+      "http.server",
+      "json",
+      "modules.whatsapp.browser_baseline",
+      "modules.whatsapp.contract",
+      "pathlib",
+      "threading",
+      "time"
+    ],
+    "literal_paths": [
+      "outputs/real-local-browser-baseline.json"
+    ],
+    "local_imports": [
+      "app.config",
+      "app.trace",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "modules.whatsapp.browser_baseline",
+      "modules.whatsapp.contract"
+    ]
+  },
+  "evals.local_inventory_acceptance": {
+    "path": "evals/local_inventory_acceptance.py",
+    "imports": [
+      "app.config",
+      "app.trace",
+      "argparse",
+      "asyncio",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "collections",
+      "evals.local_shadow_safety",
+      "importlib.metadata",
+      "json",
+      "modules.whatsapp.safety",
+      "pathlib",
+      "time",
+      "urllib.parse"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.trace",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "evals.local_shadow_safety",
+      "modules.whatsapp.safety"
+    ]
+  },
+  "evals.local_remaining_fields": {
+    "path": "evals/local_remaining_fields.py",
+    "imports": [
+      "app.config",
+      "app.trace",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "contextlib",
+      "evals.local_browser_baseline",
+      "html",
+      "http.server",
+      "json",
+      "modules.whatsapp.browser_baseline",
+      "modules.whatsapp.contract",
+      "pathlib",
+      "threading",
+      "time"
+    ],
+    "literal_paths": [
+      "outputs/real-local-remaining-fields.json"
+    ],
+    "local_imports": [
+      "app.config",
+      "app.trace",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "evals.local_browser_baseline",
+      "modules.whatsapp.browser_baseline",
+      "modules.whatsapp.contract"
+    ]
+  },
+  "evals.local_setup_agent_acceptance": {
+    "path": "evals/local_setup_agent_acceptance.py",
+    "imports": [
+      "app.config",
+      "app.trace",
+      "asyncio",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "contextlib",
+      "deep_agents.offline",
+      "evals.local_shadow_safety",
+      "hashlib",
+      "html",
+      "http.server",
+      "importlib.metadata",
+      "json",
+      "langchain_core.messages",
+      "langchain_core.outputs",
+      "langsmith",
+      "modules.whatsapp.agent",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.session",
+      "modules.whatsapp.tools",
+      "pathlib",
+      "threading",
+      "time",
+      "uuid"
+    ],
+    "literal_paths": [
+      "evals/local_setup_agent_acceptance.py",
+      "outputs/real-local-setup-agent-acceptance.json"
+    ],
+    "local_imports": [
+      "app.config",
+      "app.trace",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "deep_agents.offline",
+      "evals.local_shadow_safety",
+      "modules.whatsapp.agent",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.session",
+      "modules.whatsapp.tools"
+    ]
+  },
+  "evals.local_setup_destination": {
+    "path": "evals/local_setup_destination.py",
+    "imports": [
+      "app.config",
+      "app.trace",
+      "asyncio",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "contextlib",
+      "deep_agents.offline",
+      "evals.local_setup_agent_acceptance",
+      "http.server",
+      "json",
+      "langchain_core.messages",
+      "langchain_core.outputs",
+      "langsmith",
+      "modules.whatsapp.agent",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.destination",
+      "modules.whatsapp.session",
+      "modules.whatsapp.tools",
+      "pathlib",
+      "threading",
+      "time",
+      "uuid"
+    ],
+    "literal_paths": [
+      "outputs/real-local-setup-destination.json"
+    ],
+    "local_imports": [
+      "app.config",
+      "app.trace",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "deep_agents.offline",
+      "evals.local_setup_agent_acceptance",
+      "modules.whatsapp.agent",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.destination",
+      "modules.whatsapp.session",
+      "modules.whatsapp.tools"
+    ]
+  },
+  "evals.local_setup_execution": {
+    "path": "evals/local_setup_execution.py",
+    "imports": [
+      "app.config",
+      "app.trace",
+      "asyncio",
+      "browser.observed_control",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "contextlib",
+      "deep_agents.offline",
+      "evals.local_setup_agent_acceptance",
+      "http.server",
+      "json",
+      "langchain_core.messages",
+      "langchain_core.outputs",
+      "modules.whatsapp.agent",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.destination",
+      "modules.whatsapp.session",
+      "modules.whatsapp.tools",
+      "modules.whatsapp.workflow",
+      "pathlib",
+      "pydantic",
+      "threading",
+      "time",
+      "types",
+      "unittest.mock",
+      "uuid"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.trace",
+      "browser.observed_control",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "deep_agents.offline",
+      "evals.local_setup_agent_acceptance",
+      "modules.whatsapp.agent",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.destination",
+      "modules.whatsapp.session",
+      "modules.whatsapp.tools",
+      "modules.whatsapp.workflow"
+    ]
+  },
+  "evals.local_shadow_safety": {
+    "path": "evals/local_shadow_safety.py",
+    "imports": [
+      "app.config",
+      "app.trace",
+      "asyncio",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "importlib.metadata",
+      "json",
+      "modules.whatsapp.safety",
+      "pathlib",
+      "time"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.trace",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "modules.whatsapp.safety"
+    ]
+  },
+  "evals.local_tabs": {
+    "path": "evals/local_tabs.py",
+    "imports": [
+      "app.config",
+      "app.trace",
+      "asyncio",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "json",
+      "pathlib",
+      "time"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.trace",
+      "browser.protected_tabs",
+      "browser.stagehand_client"
+    ]
+  },
+  "evals.teacher_smoke": {
+    "path": "evals/teacher_smoke.py",
+    "imports": [
+      "app.config",
+      "app.state",
+      "app.trace",
+      "argparse",
+      "asyncio",
+      "deep_agents.controller",
+      "deep_agents.models",
+      "deep_agents.offline",
+      "deep_agents.permissions",
+      "json",
+      "pathlib"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.state",
+      "app.trace",
+      "deep_agents.controller",
+      "deep_agents.models",
+      "deep_agents.offline",
+      "deep_agents.permissions"
+    ]
+  },
+  "evals": {
+    "path": "evals/__init__.py",
+    "imports": [],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "learning.autonomous": {
+    "path": "learning/autonomous.py",
+    "imports": [
+      "app.config",
+      "app.state",
+      "app.trace",
+      "dataclasses",
+      "deep_agents.controller",
+      "deep_agents.offline",
+      "deep_agents.permissions",
+      "deep_agents.schemas",
+      "json",
+      "learning.policies",
+      "modules.login.policy",
+      "pathlib",
+      "re",
+      "skills.generation",
+      "skills.procedure",
+      "skills.registry",
+      "uuid"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.state",
+      "app.trace",
+      "deep_agents.controller",
+      "deep_agents.offline",
+      "deep_agents.permissions",
+      "deep_agents.schemas",
+      "learning.policies",
+      "modules.login.policy",
+      "skills.generation",
+      "skills.procedure",
+      "skills.registry"
+    ]
+  },
+  "learning.policies": {
+    "path": "learning/policies.py",
+    "imports": [
+      "pydantic",
+      "typing"
+    ],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "learning.runner": {
+    "path": "learning/runner.py",
+    "imports": [
+      "app.config",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "browser.stagehand_client",
+      "dataclasses",
+      "evals.fixture",
+      "modules.login.authentication",
+      "modules.login.workflow",
+      "pathlib"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "browser.stagehand_client",
+      "evals.fixture",
+      "modules.login.authentication",
+      "modules.login.workflow"
+    ]
+  },
+  "learning.three_run": {
+    "path": "learning/three_run.py",
+    "imports": [
+      "app.config",
+      "app.model_settings",
+      "app.safety",
+      "app.state",
+      "dataclasses",
+      "deep_agents.controller",
+      "deep_agents.permissions",
+      "deep_agents.schemas",
+      "json",
+      "learning.autonomous",
+      "learning.policies",
+      "learning.workflow",
+      "modules.login.policy",
+      "pathlib",
+      "skills.procedure",
+      "skills.registry",
+      "time",
+      "uuid"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.model_settings",
+      "app.safety",
+      "app.state",
+      "deep_agents.controller",
+      "deep_agents.permissions",
+      "deep_agents.schemas",
+      "learning.autonomous",
+      "learning.policies",
+      "learning.workflow",
+      "modules.login.policy",
+      "skills.procedure",
+      "skills.registry"
+    ]
+  },
+  "learning.workflow": {
+    "path": "learning/workflow.py",
+    "imports": [
+      "typing"
+    ],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "learning": {
+    "path": "learning/__init__.py",
+    "imports": [],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "modules": {
+    "path": "modules/__init__.py",
+    "imports": [],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "modules.login.authentication": {
+    "path": "modules/login/authentication.py",
+    "imports": [
+      "app.safety",
+      "asyncio",
+      "msvcrt",
+      "select",
+      "sys"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.safety"
+    ]
+  },
+  "modules.login.credentials": {
+    "path": "modules/login/credentials.py",
+    "imports": [
+      "app.config",
+      "app.safety",
+      "asyncio",
+      "browser.live_dom",
+      "json",
+      "os",
+      "pydantic",
+      "urllib.parse"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.safety",
+      "browser.live_dom"
+    ]
+  },
+  "modules.login.discovery": {
+    "path": "modules/login/discovery.py",
+    "imports": [
+      "modules.login.negative_scan"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "modules.login.negative_scan"
+    ]
+  },
+  "modules.login.evidence": {
+    "path": "modules/login/evidence.py",
+    "imports": [
+      "app.state",
+      "browser.evidence_diagnostics",
+      "json",
+      "modules.login.discovery",
+      "modules.login.verifier",
+      "pathlib",
+      "pydantic",
+      "typing",
+      "urllib.parse"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.state",
+      "browser.evidence_diagnostics",
+      "modules.login.discovery",
+      "modules.login.verifier"
+    ]
+  },
+  "modules.login.negative_scan": {
+    "path": "modules/login/negative_scan.py",
+    "imports": [],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "modules.login.policy": {
+    "path": "modules/login/policy.py",
+    "imports": [
+      "app.state"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.state"
+    ]
+  },
+  "modules.login.review": {
+    "path": "modules/login/review.py",
+    "imports": [
+      "app.state",
+      "deep_agents.evidence",
+      "deep_agents.review_contract",
+      "deep_agents.schemas"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.state",
+      "deep_agents.evidence",
+      "deep_agents.review_contract",
+      "deep_agents.schemas"
+    ]
+  },
+  "modules.login.verifier": {
+    "path": "modules/login/verifier.py",
+    "imports": [
+      "app.state"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.state"
+    ]
+  },
+  "modules.login.workflow": {
+    "path": "modules/login/workflow.py",
+    "imports": [
+      "app.config",
+      "app.graph",
+      "app.state",
+      "asyncio",
+      "langgraph.types"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.graph",
+      "app.state"
+    ]
+  },
+  "modules.login": {
+    "path": "modules/login/__init__.py",
+    "imports": [],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "modules.whatsapp.agent": {
+    "path": "modules/whatsapp/agent.py",
+    "imports": [
+      "deep_agents.permissions",
+      "deepagents",
+      "deepagents.backends",
+      "langchain.agents.structured_output",
+      "langgraph.checkpoint.memory",
+      "modules.whatsapp.contract"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "deep_agents.permissions",
+      "modules.whatsapp.contract"
+    ]
+  },
+  "modules.whatsapp.authorization": {
+    "path": "modules/whatsapp/authorization.py",
+    "imports": [
+      "asyncio",
+      "dataclasses",
+      "json",
+      "modules.whatsapp.contract",
+      "msvcrt",
+      "select",
+      "sys"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "modules.whatsapp.contract"
+    ]
+  },
+  "modules.whatsapp.baseline_login": {
+    "path": "modules/whatsapp/baseline_login.py",
+    "imports": [
+      "app.safety",
+      "deep_agents.controller",
+      "deep_agents.schemas",
+      "langsmith",
+      "modules.whatsapp.browser_baseline",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.session"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.safety",
+      "deep_agents.controller",
+      "deep_agents.schemas",
+      "modules.whatsapp.browser_baseline",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.session"
+    ]
+  },
+  "modules.whatsapp.browser_baseline": {
+    "path": "modules/whatsapp/browser_baseline.py",
+    "imports": [
+      "asyncio",
+      "browser.observed_control",
+      "json",
+      "modules.login.negative_scan",
+      "modules.whatsapp.browser_baseline_dom",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.interactive_widgets",
+      "re",
+      "urllib.parse"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "browser.observed_control",
+      "modules.login.negative_scan",
+      "modules.whatsapp.browser_baseline_dom",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.interactive_widgets"
+    ]
+  },
+  "modules.whatsapp.browser_baseline_dom": {
+    "path": "modules/whatsapp/browser_baseline_dom.py",
+    "imports": [
+      "json"
+    ],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "modules.whatsapp.contract": {
+    "path": "modules/whatsapp/contract.py",
+    "imports": [
+      "app.config",
+      "dataclasses",
+      "pydantic",
+      "typing"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config"
+    ]
+  },
+  "modules.whatsapp.destination": {
+    "path": "modules/whatsapp/destination.py",
+    "imports": [
+      "modules.whatsapp.contract",
+      "urllib.parse"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "modules.whatsapp.contract"
+    ]
+  },
+  "modules.whatsapp.dom": {
+    "path": "modules/whatsapp/dom.py",
+    "imports": [],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "modules.whatsapp.failure_inspection": {
+    "path": "modules/whatsapp/failure_inspection.py",
+    "imports": [
+      "asyncio",
+      "browser.inspection",
+      "browser.protected_tabs",
+      "json",
+      "sys",
+      "time"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "browser.inspection",
+      "browser.protected_tabs"
+    ]
+  },
+  "modules.whatsapp.interactive_widgets": {
+    "path": "modules/whatsapp/interactive_widgets.py",
+    "imports": [
+      "asyncio",
+      "json",
+      "modules.whatsapp.browser_baseline",
+      "modules.whatsapp.browser_baseline_dom",
+      "modules.whatsapp.contract"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "modules.whatsapp.browser_baseline",
+      "modules.whatsapp.browser_baseline_dom",
+      "modules.whatsapp.contract"
+    ]
+  },
+  "modules.whatsapp.login_handoff": {
+    "path": "modules/whatsapp/login_handoff.py",
+    "imports": [
+      "app.state",
+      "deep_agents.live_tools",
+      "langchain.agents.middleware"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.state",
+      "deep_agents.live_tools"
+    ]
+  },
+  "modules.whatsapp.observation": {
+    "path": "modules/whatsapp/observation.py",
+    "imports": [
+      "json",
+      "modules.whatsapp.contract"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "modules.whatsapp.contract"
+    ]
+  },
+  "modules.whatsapp.persistence": {
+    "path": "modules/whatsapp/persistence.py",
+    "imports": [
+      "browser.readonly_cdp",
+      "collections"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "browser.readonly_cdp"
+    ]
+  },
+  "modules.whatsapp.review": {
+    "path": "modules/whatsapp/review.py",
+    "imports": [
+      "app.state",
+      "deep_agents.evidence",
+      "deep_agents.review_contract",
+      "modules.login.review",
+      "re"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.state",
+      "deep_agents.evidence",
+      "deep_agents.review_contract",
+      "modules.login.review"
+    ]
+  },
+  "modules.whatsapp.safety": {
+    "path": "modules/whatsapp/safety.py",
+    "imports": [
+      "asyncio",
+      "browser.metadata_channel",
+      "browser.protected_tabs",
+      "browser.shadow_inventory",
+      "json",
+      "modules.login.negative_scan"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "browser.metadata_channel",
+      "browser.protected_tabs",
+      "browser.shadow_inventory",
+      "modules.login.negative_scan"
+    ]
+  },
+  "modules.whatsapp.scope_evidence": {
+    "path": "modules/whatsapp/scope_evidence.py",
+    "imports": [
+      "asyncio",
+      "browser.metadata_channel",
+      "browser.protected_tabs",
+      "collections",
+      "hashlib",
+      "json",
+      "urllib.parse"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "browser.metadata_channel",
+      "browser.protected_tabs"
+    ]
+  },
+  "modules.whatsapp.session": {
+    "path": "modules/whatsapp/session.py",
+    "imports": [
+      "app.state",
+      "asyncio",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "deep_agents.permissions",
+      "modules.login.verifier",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.destination",
+      "msvcrt",
+      "select",
+      "sys",
+      "time"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.state",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "deep_agents.permissions",
+      "modules.login.verifier",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.destination"
+    ]
+  },
+  "modules.whatsapp.tools": {
+    "path": "modules/whatsapp/tools.py",
+    "imports": [
+      "app.safety",
+      "asyncio",
+      "browser.observed_control",
+      "json",
+      "langchain_core.tools",
+      "modules.whatsapp.authorization",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.destination",
+      "modules.whatsapp.dom",
+      "modules.whatsapp.observation",
+      "modules.whatsapp.safety",
+      "modules.whatsapp.scope_evidence",
+      "modules.whatsapp.session",
+      "urllib.parse",
+      "uuid"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.safety",
+      "browser.observed_control",
+      "modules.whatsapp.authorization",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.destination",
+      "modules.whatsapp.dom",
+      "modules.whatsapp.observation",
+      "modules.whatsapp.safety",
+      "modules.whatsapp.scope_evidence",
+      "modules.whatsapp.session"
+    ]
+  },
+  "modules.whatsapp.workflow": {
+    "path": "modules/whatsapp/workflow.py",
+    "imports": [
+      "app.config",
+      "app.model_settings",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "asyncio",
+      "browser.inspection",
+      "dataclasses",
+      "deep_agents.controller",
+      "deep_agents.models",
+      "deep_agents.review",
+      "deep_agents.schemas",
+      "json",
+      "langsmith",
+      "learning.policies",
+      "modules.login.credentials",
+      "modules.login.evidence",
+      "modules.whatsapp.agent",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.failure_inspection",
+      "modules.whatsapp.login_handoff",
+      "modules.whatsapp.persistence",
+      "modules.whatsapp.review",
+      "modules.whatsapp.session",
+      "modules.whatsapp.tools",
+      "pathlib",
+      "re",
+      "skills.registry",
+      "sys",
+      "time"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.model_settings",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "browser.inspection",
+      "deep_agents.controller",
+      "deep_agents.models",
+      "deep_agents.review",
+      "deep_agents.schemas",
+      "learning.policies",
+      "modules.login.credentials",
+      "modules.login.evidence",
+      "modules.whatsapp.agent",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.failure_inspection",
+      "modules.whatsapp.login_handoff",
+      "modules.whatsapp.persistence",
+      "modules.whatsapp.review",
+      "modules.whatsapp.session",
+      "modules.whatsapp.tools",
+      "skills.registry"
+    ]
+  },
+  "modules.whatsapp": {
+    "path": "modules/whatsapp/__init__.py",
+    "imports": [],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "outputs.local_blank_tab_probe": {
+    "path": "outputs/local_blank_tab_probe.py",
+    "imports": [
+      "app.config",
+      "app.trace",
+      "asyncio",
+      "browser.stagehand_client",
+      "json",
+      "urllib.parse"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.trace",
+      "browser.stagehand_client"
+    ]
+  },
+  "outputs.local_protected_tab_acceptance": {
+    "path": "outputs/local_protected_tab_acceptance.py",
+    "imports": [
+      "app.config",
+      "app.trace",
+      "asyncio",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "json"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.trace",
+      "browser.protected_tabs",
+      "browser.stagehand_client"
+    ]
+  },
+  "outputs.pass1_probe": {
+    "path": "outputs/pass1_probe.py",
+    "imports": [
+      "app.config",
+      "asyncio",
+      "deep_agents.controller"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "deep_agents.controller"
+    ]
+  },
+  "outputs.pass2_probe": {
+    "path": "outputs/pass2_probe.py",
+    "imports": [
+      "app.config",
+      "asyncio",
+      "deep_agents.controller",
+      "learning.policies"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "deep_agents.controller",
+      "learning.policies"
+    ]
+  },
+  "outputs.pass2_skill_probe": {
+    "path": "outputs/pass2_skill_probe.py",
+    "imports": [
+      "app.config",
+      "asyncio",
+      "deep_agents.controller",
+      "skills.registry"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "deep_agents.controller",
+      "skills.registry"
+    ]
+  },
+  "outputs.read_authorized_console": {
+    "path": "outputs/read_authorized_console.py",
+    "imports": [
+      "ctypes",
+      "json",
+      "pathlib",
+      "re"
+    ],
+    "literal_paths": [
+      "outputs/authorized-live-three-progress.json"
+    ],
+    "local_imports": []
+  },
+  "skills.audit": {
+    "path": "skills/audit.py",
+    "imports": [
+      "app.config",
+      "app.state",
+      "json",
+      "pathlib",
+      "re",
+      "skills.registry"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.state",
+      "skills.registry"
+    ]
+  },
+  "skills.backend": {
+    "path": "skills/backend.py",
+    "imports": [
+      "dataclasses",
+      "deepagents.backends.protocol"
+    ],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "skills.generation": {
+    "path": "skills/generation.py",
+    "imports": [
+      "learning.policies",
+      "yaml"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "learning.policies"
+    ]
+  },
+  "skills.procedure": {
+    "path": "skills/procedure.py",
+    "imports": [
+      "app.config",
+      "app.state",
+      "json",
+      "learning.policies",
+      "modules.login.verifier",
+      "skills.registry",
+      "uuid"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.state",
+      "learning.policies",
+      "modules.login.verifier",
+      "skills.registry"
+    ]
+  },
+  "skills.registry": {
+    "path": "skills/registry.py",
+    "imports": [
+      "app.config",
+      "contextlib",
+      "hashlib",
+      "json",
+      "learning.policies",
+      "pathlib",
+      "re",
+      "shutil",
+      "skills.backend",
+      "yaml"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "learning.policies",
+      "skills.backend"
+    ]
+  },
+  "skills": {
+    "path": "skills/__init__.py",
+    "imports": [],
+    "literal_paths": [],
+    "local_imports": []
+  },
+  "tests.test_baseline_login_handoff": {
+    "path": "tests/test_baseline_login_handoff.py",
+    "imports": [
+      "app.config",
+      "app.state",
+      "app.trace",
+      "app.whatsapp_baseline",
+      "deep_agents.controller",
+      "modules.whatsapp.baseline_login",
+      "modules.whatsapp.browser_baseline",
+      "pytest",
+      "types",
+      "unittest.mock"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.state",
+      "app.trace",
+      "app.whatsapp_baseline",
+      "deep_agents.controller",
+      "modules.whatsapp.baseline_login",
+      "modules.whatsapp.browser_baseline"
+    ]
+  },
+  "tests.test_browser": {
+    "path": "tests/test_browser.py",
+    "imports": [
+      "app.config",
+      "app.model",
+      "app.state",
+      "app.trace",
+      "asyncio",
+      "browser.stagehand_client",
+      "evals.fixture",
+      "learning.runner",
+      "os",
+      "pathlib",
+      "pytest"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.model",
+      "app.state",
+      "app.trace",
+      "browser.stagehand_client",
+      "evals.fixture",
+      "learning.runner"
+    ]
+  },
+  "tests.test_browser_baseline": {
+    "path": "tests/test_browser_baseline.py",
+    "imports": [
+      "app.config",
+      "app.whatsapp_baseline",
+      "json",
+      "modules.whatsapp.browser_baseline",
+      "modules.whatsapp.contract",
+      "pytest",
+      "types",
+      "unittest.mock"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.whatsapp_baseline",
+      "modules.whatsapp.browser_baseline",
+      "modules.whatsapp.contract"
+    ]
+  },
+  "tests.test_codex": {
+    "path": "tests/test_codex.py",
+    "imports": [
+      "app.codex_reasoner",
+      "app.config",
+      "app.model",
+      "app.state",
+      "asyncio",
+      "json",
+      "pathlib",
+      "pytest"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.codex_reasoner",
+      "app.config",
+      "app.model",
+      "app.state"
+    ]
+  },
+  "tests.test_core": {
+    "path": "tests/test_core.py",
+    "imports": [
+      "app.approval",
+      "app.config",
+      "app.graph",
+      "app.model",
+      "app.state",
+      "app.trace",
+      "dataclasses",
+      "json",
+      "langgraph.types",
+      "modules.login.verifier",
+      "os",
+      "pytest"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.approval",
+      "app.config",
+      "app.graph",
+      "app.model",
+      "app.state",
+      "app.trace",
+      "modules.login.verifier"
+    ]
+  },
+  "tests.test_deep_browser": {
+    "path": "tests/test_deep_browser.py",
+    "imports": [
+      "app.config",
+      "app.state",
+      "app.trace",
+      "browser.stagehand_client",
+      "deep_agents.browser_tools",
+      "deep_agents.controller",
+      "deep_agents.offline",
+      "evals.fixture",
+      "json",
+      "langchain_core.messages",
+      "os",
+      "pathlib",
+      "pytest"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.state",
+      "app.trace",
+      "browser.stagehand_client",
+      "deep_agents.browser_tools",
+      "deep_agents.controller",
+      "deep_agents.offline",
+      "evals.fixture"
+    ]
+  },
+  "tests.test_evidence_discovery_repair": {
+    "path": "tests/test_evidence_discovery_repair.py",
+    "imports": [
+      "app.config",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "asyncio",
+      "browser.discovery",
+      "browser.evidence_diagnostics",
+      "browser.evidence_review",
+      "browser.readonly_cdp",
+      "browser.stagehand_client",
+      "hashlib",
+      "json",
+      "modules.login.discovery",
+      "modules.login.evidence",
+      "pathlib",
+      "pydantic",
+      "pytest",
+      "shutil",
+      "subprocess",
+      "time",
+      "types",
+      "unittest.mock"
+    ],
+    "literal_paths": [
+      "outputs/evidence-discovery-preservation.json"
+    ],
+    "local_imports": [
+      "app.config",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "browser.discovery",
+      "browser.evidence_diagnostics",
+      "browser.evidence_review",
+      "browser.readonly_cdp",
+      "browser.stagehand_client",
+      "modules.login.discovery",
+      "modules.login.evidence"
+    ]
+  },
+  "tests.test_final_browser_readiness": {
+    "path": "tests/test_final_browser_readiness.py",
+    "imports": [
+      "app.config",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "asyncio",
+      "browser.cdp_endpoint",
+      "browser.discovery",
+      "browser.evidence_review",
+      "browser.navigation_guard",
+      "browser.stagehand_client",
+      "hashlib",
+      "json",
+      "pathlib",
+      "pydantic",
+      "pytest",
+      "types",
+      "unittest.mock"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "browser.cdp_endpoint",
+      "browser.discovery",
+      "browser.evidence_review",
+      "browser.navigation_guard",
+      "browser.stagehand_client"
+    ]
+  },
+  "tests.test_final_readiness": {
+    "path": "tests/test_final_readiness.py",
+    "imports": [
+      "app.config",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "asyncio",
+      "browser.evidence_review",
+      "browser.navigation_guard",
+      "browser.stagehand_client",
+      "deep_agents.controller",
+      "deep_agents.offline",
+      "deep_agents.permissions",
+      "deep_agents.schemas",
+      "deepagents.middleware.skills",
+      "evals.teacher_smoke",
+      "io",
+      "json",
+      "langchain_core.messages",
+      "langchain_core.outputs",
+      "logging",
+      "modules.login.evidence",
+      "os",
+      "pathlib",
+      "pydantic",
+      "pytest",
+      "select",
+      "skills.audit",
+      "skills.procedure",
+      "skills.registry",
+      "time",
+      "types",
+      "uuid"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "browser.evidence_review",
+      "browser.navigation_guard",
+      "browser.stagehand_client",
+      "deep_agents.controller",
+      "deep_agents.offline",
+      "deep_agents.permissions",
+      "deep_agents.schemas",
+      "evals.teacher_smoke",
+      "modules.login.evidence",
+      "skills.audit",
+      "skills.procedure",
+      "skills.registry"
+    ]
+  },
+  "tests.test_interactive_widgets": {
+    "path": "tests/test_interactive_widgets.py",
+    "imports": [
+      "app.config",
+      "app.trace",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "evals",
+      "evals.local_browser_baseline",
+      "json",
+      "modules.whatsapp.browser_baseline",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.interactive_widgets",
+      "os",
+      "pytest",
+      "unittest.mock"
+    ],
+    "literal_paths": [
+      "outputs/real-local-interactive-widgets.json"
+    ],
+    "local_imports": [
+      "app.config",
+      "app.trace",
+      "browser.protected_tabs",
+      "browser.stagehand_client",
+      "evals",
+      "evals.local_browser_baseline",
+      "modules.whatsapp.browser_baseline",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.interactive_widgets"
+    ]
+  },
+  "tests.test_inventory_batching": {
+    "path": "tests/test_inventory_batching.py",
+    "imports": [
+      "app.config",
+      "browser.shadow_inventory",
+      "copy",
+      "hashlib",
+      "json",
+      "modules.whatsapp.safety",
+      "pytest",
+      "test_whatsapp_phase1",
+      "unittest.mock"
+    ],
+    "literal_paths": [
+      "outputs/inventory-batching-preservation.json"
+    ],
+    "local_imports": [
+      "app.config",
+      "browser.shadow_inventory",
+      "modules.whatsapp.safety"
+    ]
+  },
+  "tests.test_live_execution_repair": {
+    "path": "tests/test_live_execution_repair.py",
+    "imports": [
+      "app.config",
+      "app.state",
+      "app.trace",
+      "asyncio",
+      "browser.discovery",
+      "browser.evidence_diagnostics",
+      "browser.lifecycle",
+      "browser.navigation_guard",
+      "browser.readonly_cdp",
+      "browser.stagehand_client",
+      "dataclasses",
+      "deep_agents.controller",
+      "deep_agents.offline",
+      "deep_agents.permissions",
+      "deep_agents.schemas",
+      "evals.fixture",
+      "json",
+      "modules.login.evidence",
+      "modules.login.policy",
+      "modules.login.verifier",
+      "os",
+      "pydantic",
+      "pytest",
+      "types",
+      "unittest.mock",
+      "urllib.parse"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.state",
+      "app.trace",
+      "browser.discovery",
+      "browser.evidence_diagnostics",
+      "browser.lifecycle",
+      "browser.navigation_guard",
+      "browser.readonly_cdp",
+      "browser.stagehand_client",
+      "deep_agents.controller",
+      "deep_agents.offline",
+      "deep_agents.permissions",
+      "deep_agents.schemas",
+      "evals.fixture",
+      "modules.login.evidence",
+      "modules.login.policy",
+      "modules.login.verifier"
+    ]
+  },
+  "tests.test_live_failure_regression": {
+    "path": "tests/test_live_failure_regression.py",
+    "imports": [
+      "app.config",
+      "app.state",
+      "app.trace",
+      "browser.guard_state",
+      "browser.live_dom",
+      "browser.navigation_guard",
+      "browser.stagehand_client",
+      "deep_agents.browser_tools",
+      "deep_agents.controller",
+      "deep_agents.permissions",
+      "deep_agents.schemas",
+      "evals.fixture",
+      "json",
+      "learning.policies",
+      "os",
+      "pytest",
+      "types"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.state",
+      "app.trace",
+      "browser.guard_state",
+      "browser.live_dom",
+      "browser.navigation_guard",
+      "browser.stagehand_client",
+      "deep_agents.browser_tools",
+      "deep_agents.controller",
+      "deep_agents.permissions",
+      "deep_agents.schemas",
+      "evals.fixture",
+      "learning.policies"
+    ]
+  },
+  "tests.test_metadata_channel": {
+    "path": "tests/test_metadata_channel.py",
+    "imports": [
+      "asyncio",
+      "browser.metadata_channel",
+      "collections",
+      "json",
+      "pytest",
+      "types",
+      "unittest.mock"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "browser.metadata_channel"
+    ]
+  },
+  "tests.test_model": {
+    "path": "tests/test_model.py",
+    "imports": [
+      "app.config",
+      "app.model",
+      "app.state",
+      "json",
+      "pydantic",
+      "pytest",
+      "types"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.model",
+      "app.state"
+    ]
+  },
+  "tests.test_pass1": {
+    "path": "tests/test_pass1.py",
+    "imports": [
+      "app.cli",
+      "app.config",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "asyncio",
+      "browser.stagehand_client",
+      "deep_agents.browser_tools",
+      "deep_agents.controller",
+      "deep_agents.doer",
+      "deep_agents.models",
+      "deep_agents.offline",
+      "deep_agents.permissions",
+      "deep_agents.schemas",
+      "deep_agents.teacher",
+      "deepagents",
+      "deepagents.backends",
+      "json",
+      "langchain_core.messages",
+      "langchain_core.outputs",
+      "langchain_core.tools",
+      "pathlib",
+      "pytest",
+      "types",
+      "uuid"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.cli",
+      "app.config",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "browser.stagehand_client",
+      "deep_agents.browser_tools",
+      "deep_agents.controller",
+      "deep_agents.doer",
+      "deep_agents.models",
+      "deep_agents.offline",
+      "deep_agents.permissions",
+      "deep_agents.schemas",
+      "deep_agents.teacher"
+    ]
+  },
+  "tests.test_pass2": {
+    "path": "tests/test_pass2.py",
+    "imports": [
+      "app.cli",
+      "app.config",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "asyncio",
+      "browser.diagnostics",
+      "browser.stagehand_client",
+      "deep_agents.live_tools",
+      "json",
+      "learning.policies",
+      "modules.login.credentials",
+      "modules.login.evidence",
+      "modules.login.verifier",
+      "pathlib",
+      "pydantic",
+      "pytest",
+      "skills.backend",
+      "skills.generation",
+      "skills.registry",
+      "types",
+      "uuid"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.cli",
+      "app.config",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "browser.diagnostics",
+      "browser.stagehand_client",
+      "deep_agents.live_tools",
+      "learning.policies",
+      "modules.login.credentials",
+      "modules.login.evidence",
+      "modules.login.verifier",
+      "skills.backend",
+      "skills.generation",
+      "skills.registry"
+    ]
+  },
+  "tests.test_pass2_browser": {
+    "path": "tests/test_pass2_browser.py",
+    "imports": [
+      "app.config",
+      "app.state",
+      "app.trace",
+      "asyncio",
+      "browser.diagnostics",
+      "browser.live_dom",
+      "browser.stagehand_client",
+      "deep_agents.browser_tools",
+      "deep_agents.controller",
+      "deep_agents.offline",
+      "evals.fixture",
+      "json",
+      "learning.autonomous",
+      "learning.policies",
+      "os",
+      "pytest",
+      "skills.generation",
+      "skills.registry",
+      "uuid"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.state",
+      "app.trace",
+      "browser.diagnostics",
+      "browser.live_dom",
+      "browser.stagehand_client",
+      "deep_agents.browser_tools",
+      "deep_agents.controller",
+      "deep_agents.offline",
+      "evals.fixture",
+      "learning.autonomous",
+      "learning.policies",
+      "skills.generation",
+      "skills.registry"
+    ]
+  },
+  "tests.test_post_login_block_repair": {
+    "path": "tests/test_post_login_block_repair.py",
+    "imports": [
+      "app.config",
+      "app.state",
+      "app.trace",
+      "asyncio",
+      "browser.guard_state",
+      "browser.navigation_guard",
+      "browser.stagehand_client",
+      "dataclasses",
+      "deep_agents.browser_tools",
+      "evals.fixture",
+      "json",
+      "modules.login.verifier",
+      "os",
+      "pytest",
+      "urllib.parse"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.state",
+      "app.trace",
+      "browser.guard_state",
+      "browser.navigation_guard",
+      "browser.stagehand_client",
+      "deep_agents.browser_tools",
+      "evals.fixture",
+      "modules.login.verifier"
+    ]
+  },
+  "tests.test_real_baseline_login_handoff": {
+    "path": "tests/test_real_baseline_login_handoff.py",
+    "imports": [
+      "evals.local_baseline_login_handoff",
+      "os",
+      "pytest"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "evals.local_baseline_login_handoff"
+    ]
+  },
+  "tests.test_real_browser_baseline": {
+    "path": "tests/test_real_browser_baseline.py",
+    "imports": [
+      "evals.local_browser_baseline",
+      "os",
+      "pytest"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "evals.local_browser_baseline"
+    ]
+  },
+  "tests.test_real_chromium_tabs": {
+    "path": "tests/test_real_chromium_tabs.py",
+    "imports": [
+      "evals.local_tabs",
+      "os",
+      "pytest"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "evals.local_tabs"
+    ]
+  },
+  "tests.test_real_inventory_complexity": {
+    "path": "tests/test_real_inventory_complexity.py",
+    "imports": [
+      "evals.local_inventory_acceptance",
+      "os",
+      "pytest"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "evals.local_inventory_acceptance"
+    ]
+  },
+  "tests.test_real_remaining_fields": {
+    "path": "tests/test_real_remaining_fields.py",
+    "imports": [
+      "evals.local_remaining_fields",
+      "os",
+      "pytest"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "evals.local_remaining_fields"
+    ]
+  },
+  "tests.test_real_setup_agent": {
+    "path": "tests/test_real_setup_agent.py",
+    "imports": [
+      "evals.local_setup_agent_acceptance",
+      "os",
+      "pytest"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "evals.local_setup_agent_acceptance"
+    ]
+  },
+  "tests.test_real_setup_destination": {
+    "path": "tests/test_real_setup_destination.py",
+    "imports": [
+      "evals.local_setup_destination",
+      "os",
+      "pytest"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "evals.local_setup_destination"
+    ]
+  },
+  "tests.test_real_setup_execution": {
+    "path": "tests/test_real_setup_execution.py",
+    "imports": [
+      "evals.local_setup_execution",
+      "os",
+      "pytest"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "evals.local_setup_execution"
+    ]
+  },
+  "tests.test_real_setup_scroll": {
+    "path": "tests/test_real_setup_scroll.py",
+    "imports": [
+      "evals.local_setup_agent_acceptance",
+      "os",
+      "pytest"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "evals.local_setup_agent_acceptance"
+    ]
+  },
+  "tests.test_real_shadow_safety": {
+    "path": "tests/test_real_shadow_safety.py",
+    "imports": [
+      "evals.local_shadow_safety",
+      "modules.whatsapp.safety",
+      "os",
+      "pytest"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "evals.local_shadow_safety",
+      "modules.whatsapp.safety"
+    ]
+  },
+  "tests.test_real_teacher_reliability": {
+    "path": "tests/test_real_teacher_reliability.py",
+    "imports": [
+      "app.model_settings",
+      "app.trace",
+      "deep_agents.diagnostics",
+      "deep_agents.evidence",
+      "deep_agents.models",
+      "deep_agents.permissions",
+      "deep_agents.review",
+      "deep_agents.review_contract",
+      "deep_agents.schemas",
+      "deep_agents.teacher_replay",
+      "json",
+      "modules.login.review",
+      "pathlib",
+      "pytest"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.model_settings",
+      "app.trace",
+      "deep_agents.diagnostics",
+      "deep_agents.evidence",
+      "deep_agents.models",
+      "deep_agents.permissions",
+      "deep_agents.review",
+      "deep_agents.review_contract",
+      "deep_agents.schemas",
+      "deep_agents.teacher_replay",
+      "modules.login.review"
+    ]
+  },
+  "tests.test_remaining_field_mapping": {
+    "path": "tests/test_remaining_field_mapping.py",
+    "imports": [
+      "app.config",
+      "app.whatsapp_baseline",
+      "ast",
+      "hashlib",
+      "json",
+      "modules.whatsapp.browser_baseline",
+      "pytest",
+      "types",
+      "unittest.mock"
+    ],
+    "literal_paths": [
+      "outputs/remaining-fields-preservation.json"
+    ],
+    "local_imports": [
+      "app.config",
+      "app.whatsapp_baseline",
+      "modules.whatsapp.browser_baseline"
+    ]
+  },
+  "tests.test_setup_agent_refactor": {
+    "path": "tests/test_setup_agent_refactor.py",
+    "imports": [
+      "app.state",
+      "browser.metadata_channel",
+      "deep_agents.controller",
+      "deep_agents.evidence",
+      "deep_agents.offline",
+      "deep_agents.schemas",
+      "json",
+      "langchain_core.messages",
+      "langchain_core.outputs",
+      "modules.whatsapp.agent",
+      "modules.whatsapp.authorization",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.review",
+      "modules.whatsapp.scope_evidence",
+      "modules.whatsapp.session",
+      "modules.whatsapp.tools",
+      "modules.whatsapp.workflow",
+      "msvcrt",
+      "pytest",
+      "select",
+      "test_whatsapp_phase1",
+      "types",
+      "unittest.mock",
+      "uuid"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.state",
+      "browser.metadata_channel",
+      "deep_agents.controller",
+      "deep_agents.evidence",
+      "deep_agents.offline",
+      "deep_agents.schemas",
+      "modules.whatsapp.agent",
+      "modules.whatsapp.authorization",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.review",
+      "modules.whatsapp.scope_evidence",
+      "modules.whatsapp.session",
+      "modules.whatsapp.tools",
+      "modules.whatsapp.workflow"
+    ]
+  },
+  "tests.test_setup_destination": {
+    "path": "tests/test_setup_destination.py",
+    "imports": [
+      "app.config",
+      "hashlib",
+      "json",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.destination",
+      "modules.whatsapp.tools",
+      "pytest",
+      "test_setup_agent_refactor",
+      "test_whatsapp_phase1"
+    ],
+    "literal_paths": [
+      "outputs/setup-destination-preservation.json",
+      "outputs/setup-execution-preservation.json"
+    ],
+    "local_imports": [
+      "app.config",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.destination",
+      "modules.whatsapp.tools"
+    ]
+  },
+  "tests.test_setup_observation": {
+    "path": "tests/test_setup_observation.py",
+    "imports": [
+      "json",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.observation",
+      "pathlib",
+      "pytest",
+      "shutil",
+      "subprocess",
+      "types",
+      "unittest.mock"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "modules.whatsapp.contract",
+      "modules.whatsapp.observation"
+    ]
+  },
+  "tests.test_shadow_safety": {
+    "path": "tests/test_shadow_safety.py",
+    "imports": [
+      "app.config",
+      "asyncio",
+      "browser.shadow_inventory",
+      "hashlib",
+      "json",
+      "modules.login.discovery",
+      "modules.whatsapp.safety",
+      "pytest",
+      "test_evidence_discovery_repair",
+      "test_whatsapp_phase1",
+      "unittest.mock"
+    ],
+    "literal_paths": [
+      "outputs/shadow-safety-preservation.json"
+    ],
+    "local_imports": [
+      "app.config",
+      "browser.shadow_inventory",
+      "modules.login.discovery",
+      "modules.whatsapp.safety"
+    ]
+  },
+  "tests.test_target_attach_repair": {
+    "path": "tests/test_target_attach_repair.py",
+    "imports": [
+      "app.config",
+      "app.state",
+      "app.trace",
+      "asyncio",
+      "browser.navigation_guard",
+      "browser.readonly_cdp",
+      "browser.stagehand_client",
+      "dataclasses",
+      "evals.fixture",
+      "json",
+      "learning.autonomous",
+      "learning.policies",
+      "learning.three_run",
+      "os",
+      "pytest",
+      "skills.registry",
+      "tests.test_three_run",
+      "types",
+      "urllib.parse",
+      "uuid"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.state",
+      "app.trace",
+      "browser.navigation_guard",
+      "browser.readonly_cdp",
+      "browser.stagehand_client",
+      "evals.fixture",
+      "learning.autonomous",
+      "learning.policies",
+      "learning.three_run",
+      "skills.registry",
+      "tests.test_three_run"
+    ]
+  },
+  "tests.test_teacher_live_repair": {
+    "path": "tests/test_teacher_live_repair.py",
+    "imports": [
+      "app.config",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "browser.discovery",
+      "browser.navigation_guard",
+      "browser.stagehand_client",
+      "deep_agents.controller",
+      "deep_agents.live_tools",
+      "deep_agents.offline",
+      "deep_agents.permissions",
+      "evals.teacher_smoke",
+      "json",
+      "langchain_core.messages",
+      "langchain_core.outputs",
+      "learning.three_run",
+      "pathlib",
+      "pydantic",
+      "pytest",
+      "types",
+      "uuid"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "browser.discovery",
+      "browser.navigation_guard",
+      "browser.stagehand_client",
+      "deep_agents.controller",
+      "deep_agents.live_tools",
+      "deep_agents.offline",
+      "deep_agents.permissions",
+      "evals.teacher_smoke",
+      "learning.three_run"
+    ]
+  },
+  "tests.test_three_run": {
+    "path": "tests/test_three_run.py",
+    "imports": [
+      "app.config",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "browser.evidence_review",
+      "browser.stagehand_client",
+      "deep_agents.controller",
+      "deep_agents.diagnostics",
+      "deep_agents.offline",
+      "deep_agents.permissions",
+      "json",
+      "learning.policies",
+      "learning.three_run",
+      "modules.login.evidence",
+      "os",
+      "pathlib",
+      "pydantic",
+      "pytest",
+      "skills.procedure",
+      "skills.registry",
+      "types",
+      "uuid",
+      "yaml"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "browser.evidence_review",
+      "browser.stagehand_client",
+      "deep_agents.controller",
+      "deep_agents.diagnostics",
+      "deep_agents.offline",
+      "deep_agents.permissions",
+      "learning.policies",
+      "learning.three_run",
+      "modules.login.evidence",
+      "skills.procedure",
+      "skills.registry"
+    ]
+  },
+  "tests.test_whatsapp_closed_scope_evidence": {
+    "path": "tests/test_whatsapp_closed_scope_evidence.py",
+    "imports": [
+      "asyncio",
+      "contextlib",
+      "copy",
+      "json",
+      "modules.whatsapp",
+      "pytest",
+      "types"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "modules.whatsapp"
+    ]
+  },
+  "tests.test_whatsapp_handoff_repair": {
+    "path": "tests/test_whatsapp_handoff_repair.py",
+    "imports": [
+      "app.config",
+      "app.state",
+      "app.trace",
+      "asyncio",
+      "browser.protected_tabs",
+      "deep_agents.doer",
+      "deep_agents.evidence",
+      "deep_agents.offline",
+      "deep_agents.review_contract",
+      "deep_agents.schemas",
+      "hashlib",
+      "json",
+      "langchain_core.messages",
+      "langchain_core.outputs",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.login_handoff",
+      "modules.whatsapp.review",
+      "modules.whatsapp.session",
+      "pathlib",
+      "pytest",
+      "test_whatsapp_phase1",
+      "types",
+      "unittest.mock",
+      "uuid"
+    ],
+    "literal_paths": [
+      "outputs/whatsapp-handoff-preservation.json"
+    ],
+    "local_imports": [
+      "app.config",
+      "app.state",
+      "app.trace",
+      "browser.protected_tabs",
+      "deep_agents.doer",
+      "deep_agents.evidence",
+      "deep_agents.offline",
+      "deep_agents.review_contract",
+      "deep_agents.schemas",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.login_handoff",
+      "modules.whatsapp.review",
+      "modules.whatsapp.session"
+    ]
+  },
+  "tests.test_whatsapp_phase1": {
+    "path": "tests/test_whatsapp_phase1.py",
+    "imports": [
+      "app.cli",
+      "app.config",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "asyncio",
+      "browser.metadata_channel",
+      "browser.navigation_guard",
+      "contextlib",
+      "dataclasses",
+      "deep_agents.controller",
+      "deep_agents.evidence",
+      "deep_agents.offline",
+      "deep_agents.review_contract",
+      "deep_agents.schemas",
+      "hashlib",
+      "json",
+      "langchain_core.messages",
+      "langchain_core.outputs",
+      "modules.whatsapp.agent",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.dom",
+      "modules.whatsapp.persistence",
+      "modules.whatsapp.review",
+      "modules.whatsapp.session",
+      "modules.whatsapp.tools",
+      "modules.whatsapp.workflow",
+      "pathlib",
+      "pytest",
+      "shutil",
+      "subprocess",
+      "types",
+      "unittest.mock",
+      "uuid"
+    ],
+    "literal_paths": [
+      "outputs/whatsapp-handoff-preservation.json"
+    ],
+    "local_imports": [
+      "app.cli",
+      "app.config",
+      "app.safety",
+      "app.state",
+      "app.trace",
+      "browser.metadata_channel",
+      "browser.navigation_guard",
+      "deep_agents.controller",
+      "deep_agents.evidence",
+      "deep_agents.offline",
+      "deep_agents.review_contract",
+      "deep_agents.schemas",
+      "modules.whatsapp.agent",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.dom",
+      "modules.whatsapp.persistence",
+      "modules.whatsapp.review",
+      "modules.whatsapp.session",
+      "modules.whatsapp.tools",
+      "modules.whatsapp.workflow"
+    ]
+  },
+  "tests.test_whatsapp_preflight_repair": {
+    "path": "tests/test_whatsapp_preflight_repair.py",
+    "imports": [
+      "app.config",
+      "app.state",
+      "asyncio",
+      "deep_agents.controller",
+      "deep_agents.schemas",
+      "hashlib",
+      "json",
+      "modules.login.discovery",
+      "modules.login.verifier",
+      "modules.whatsapp.agent",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.failure_inspection",
+      "modules.whatsapp.safety",
+      "modules.whatsapp.session",
+      "modules.whatsapp.workflow",
+      "pathlib",
+      "pytest",
+      "test_evidence_discovery_repair",
+      "test_setup_agent_refactor",
+      "test_setup_destination",
+      "test_whatsapp_phase1",
+      "types",
+      "unittest.mock"
+    ],
+    "literal_paths": [
+      "outputs/shadow-safety-preservation.json",
+      "outputs/whatsapp-preflight-preservation.json"
+    ],
+    "local_imports": [
+      "app.config",
+      "app.state",
+      "deep_agents.controller",
+      "deep_agents.schemas",
+      "modules.login.discovery",
+      "modules.login.verifier",
+      "modules.whatsapp.agent",
+      "modules.whatsapp.contract",
+      "modules.whatsapp.failure_inspection",
+      "modules.whatsapp.safety",
+      "modules.whatsapp.session",
+      "modules.whatsapp.workflow"
+    ]
+  },
+  "tests.test_whatsapp_teacher_attribution": {
+    "path": "tests/test_whatsapp_teacher_attribution.py",
+    "imports": [
+      "app.config",
+      "deep_agents.evidence",
+      "deep_agents.review_contract",
+      "hashlib",
+      "json",
+      "modules.whatsapp.review",
+      "pathlib",
+      "pytest"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "deep_agents.evidence",
+      "deep_agents.review_contract",
+      "modules.whatsapp.review"
+    ]
+  },
+  "tests.test_whatsapp_teacher_saved_native_validation": {
+    "path": "tests/test_whatsapp_teacher_saved_native_validation.py",
+    "imports": [
+      "app.config",
+      "app.trace",
+      "deep_agents.evidence",
+      "deep_agents.offline",
+      "deep_agents.permissions",
+      "deep_agents.review",
+      "deep_agents.telemetry",
+      "hashlib",
+      "json",
+      "langchain_core.messages",
+      "langchain_core.outputs",
+      "modules.whatsapp.review",
+      "pydantic",
+      "pytest"
+    ],
+    "literal_paths": [],
+    "local_imports": [
+      "app.config",
+      "app.trace",
+      "deep_agents.evidence",
+      "deep_agents.offline",
+      "deep_agents.permissions",
+      "deep_agents.review",
+      "deep_agents.telemetry",
+      "modules.whatsapp.review"
+    ]
+  }
+}

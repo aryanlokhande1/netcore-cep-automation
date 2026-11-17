@@ -1,0 +1,12 @@
+{
+  "identity": "netcore-whatsapp-v2",
+  "approved": false,
+  "status": "UNAPPROVED_V2_CANDIDATE",
+  "source_version": 2,
+  "content_sha256": "2278dd124ab929bcd7aa893448d937938e3b72d8be4fd8430b85799f52e6ccd6",
+  "provenance": {
+    "source": "Approved V2 implementation specification; static-only validation",
+    "live_skill_load_provenance": "NOT_ESTABLISHED",
+    "graduated": false
+  }
+}

@@ -1,0 +1,454 @@
+{
+  "scope": "WHATSAPP_SETUP",
+  "canonical_actions": {
+    "observe_page": {
+      "fields": [],
+      "exposed_to_browser_first_doer": true,
+      "postcondition": "protected current page observation",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {},
+        "title": "Args_observe_page",
+        "type": "object"
+      }
+    },
+    "inspect_field": {
+      "fields": [
+        "campaign_name",
+        "waba",
+        "business_number",
+        "tags"
+      ],
+      "exposed_to_browser_first_doer": true,
+      "postcondition": "current scoped field evidence, including unresolved state",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "enum": [
+              "campaign_name",
+              "waba",
+              "business_number",
+              "tags"
+            ],
+            "title": "Field",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field"
+        ],
+        "title": "Args_inspect_field",
+        "type": "object"
+      }
+    },
+    "scroll_to_field": {
+      "fields": [
+        "campaign_name",
+        "waba",
+        "business_number",
+        "tags"
+      ],
+      "exposed_to_browser_first_doer": true,
+      "postcondition": "same observed target retained after scrolling",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "enum": [
+              "campaign_name",
+              "waba",
+              "business_number",
+              "tags"
+            ],
+            "title": "Field",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field"
+        ],
+        "title": "Args_scroll_to_field",
+        "type": "object"
+      }
+    },
+    "open_dropdown": {
+      "fields": [
+        "waba",
+        "business_number",
+        "tags"
+      ],
+      "exposed_to_browser_first_doer": true,
+      "postcondition": "native/selected no-op or owned expanded popup",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "enum": [
+              "waba",
+              "business_number",
+              "tags"
+            ],
+            "title": "Field",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field"
+        ],
+        "title": "Args_open_dropdown",
+        "type": "object"
+      }
+    },
+    "inspect_options": {
+      "fields": [
+        "waba",
+        "business_number",
+        "tags"
+      ],
+      "exposed_to_browser_first_doer": true,
+      "postcondition": "owned options and exact-match counts; never selection",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "enum": [
+              "waba",
+              "business_number",
+              "tags"
+            ],
+            "title": "Field",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field"
+        ],
+        "title": "Args_inspect_options",
+        "type": "object"
+      }
+    },
+    "select_existing_option": {
+      "fields": [
+        "waba",
+        "business_number",
+        "tags"
+      ],
+      "exposed_to_browser_first_doer": true,
+      "postcondition": "independent exact selected state",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "enum": [
+              "waba",
+              "business_number",
+              "tags"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "initialize_dependency": {
+            "default": false,
+            "title": "Initialize Dependency",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "field"
+        ],
+        "title": "Args_select_existing_option",
+        "type": "object"
+      }
+    },
+    "fill_approved_field": {
+      "fields": [
+        "campaign_name"
+      ],
+      "exposed_to_browser_first_doer": true,
+      "postcondition": "independent exact input readback",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "const": "campaign_name",
+            "title": "Field",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field"
+        ],
+        "title": "Args_fill_approved_field",
+        "type": "object"
+      }
+    },
+    "verify_field": {
+      "fields": [
+        "campaign_name",
+        "waba",
+        "business_number",
+        "tags"
+      ],
+      "exposed_to_browser_first_doer": true,
+      "postcondition": "exact state or explicit FIELD_NOT_VERIFIED",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "enum": [
+              "campaign_name",
+              "waba",
+              "business_number",
+              "tags"
+            ],
+            "title": "Field",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field"
+        ],
+        "title": "Args_verify_field",
+        "type": "object"
+      }
+    },
+    "capture_failure": {
+      "fields": [],
+      "exposed_to_browser_first_doer": true,
+      "postcondition": "redacted capture status or explicit privacy/transport skip",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {},
+        "title": "Args_capture_failure",
+        "type": "object"
+      }
+    },
+    "search_existing_option": {
+      "fields": [
+        "waba",
+        "business_number",
+        "tags"
+      ],
+      "exposed_to_browser_first_doer": false,
+      "postcondition": "search input readback only, not selected state",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "enum": [
+              "waba",
+              "business_number",
+              "tags"
+            ],
+            "title": "Field",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field"
+        ],
+        "title": "Args_search_existing_option",
+        "type": "object"
+      }
+    }
+  },
+  "opaque_reference_tools": {
+    "observe_page": {
+      "canonical_action": "observe_page",
+      "arguments": [],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {},
+        "title": "ReferenceArgs_observe_page",
+        "type": "object"
+      },
+      "field_resolution": "current opaque reference, then canonical registry; existing role/kind/authorization/identity gates remain"
+    },
+    "inspect_control": {
+      "canonical_action": "inspect_field",
+      "arguments": [
+        "reference"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "reference": {
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Reference",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference"
+        ],
+        "title": "ReferenceArgs_inspect_control",
+        "type": "object"
+      },
+      "field_resolution": "current opaque reference, then canonical registry; existing role/kind/authorization/identity gates remain"
+    },
+    "scroll_to_control": {
+      "canonical_action": "scroll_to_field",
+      "arguments": [
+        "reference"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "reference": {
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Reference",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference"
+        ],
+        "title": "ReferenceArgs_scroll_to_control",
+        "type": "object"
+      },
+      "field_resolution": "current opaque reference, then canonical registry; existing role/kind/authorization/identity gates remain"
+    },
+    "click_observed_control": {
+      "canonical_action": "open_dropdown",
+      "arguments": [
+        "reference"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "reference": {
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Reference",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference"
+        ],
+        "title": "ReferenceArgs_click_observed_control",
+        "type": "object"
+      },
+      "field_resolution": "current opaque reference, then canonical registry; existing role/kind/authorization/identity gates remain"
+    },
+    "fill_text": {
+      "canonical_action": "fill_approved_field",
+      "arguments": [
+        "reference"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "reference": {
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Reference",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference"
+        ],
+        "title": "ReferenceArgs_fill_text",
+        "type": "object"
+      },
+      "field_resolution": "current opaque reference, then canonical registry; existing role/kind/authorization/identity gates remain"
+    },
+    "select_observed_option": {
+      "canonical_action": "select_existing_option",
+      "arguments": [
+        "reference",
+        "option_reference"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "reference": {
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Reference",
+            "type": "string"
+          },
+          "option_reference": {
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Option Reference",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "option_reference"
+        ],
+        "title": "ReferenceArgs_select_observed_option",
+        "type": "object"
+      },
+      "field_resolution": "current opaque reference, then canonical registry; existing role/kind/authorization/identity gates remain"
+    },
+    "verify_field": {
+      "canonical_action": "verify_field",
+      "arguments": [
+        "reference"
+      ],
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "reference": {
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Reference",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference"
+        ],
+        "title": "ReferenceArgs_verify_field",
+        "type": "object"
+      },
+      "field_resolution": "current opaque reference, then canonical registry; existing role/kind/authorization/identity gates remain"
+    }
+  },
+  "label_aliases": {
+    "campaign name": "campaign_name",
+    "campaign title": "campaign_name",
+    "waba": "waba",
+    "waba id": "waba",
+    "whatsapp business account": "waba",
+    "whatsapp business account id": "waba",
+    "business number": "business_number",
+    "add tags": "tags",
+    "tags": "tags"
+  },
+  "unchanged_login_interfaces": {
+    "synthetic": [
+      "navigate_approved",
+      "inspect_page",
+      "interact_observed",
+      "verify_dashboard"
+    ],
+    "live": [
+      "navigate_approved",
+      "inspect_page",
+      "submit_login",
+      "verify_dashboard"
+    ],
+    "optional": "read_approved_skill"
+  },
+  "teacher": "No browser/action tools; structured review only. Deterministic dispatch defects remain CODE_FIX_REQUIRED.",
+  "validation": {
+    "matrix_passed": 149,
+    "focused_passed": 282,
+    "local_chromium_command_passed": 5,
+    "full_offline": {
+      "passed": 750,
+      "failed": 17,
+      "skipped": 56
+    },
+    "live_validation": "NOT_EXECUTED",
+    "provider_usage": "NOT_AVAILABLE_NO_PROVIDER_REQUESTS"
+  }
+}

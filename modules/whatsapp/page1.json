@@ -1,0 +1,11 @@
+{
+  "workflow": "whatsapp_campaign_page1",
+  "tenant": "bajajfinservmarket",
+  "entry_url": "https://tprappin2r.netcoresmartech.com/bajajfinservmarket/admin/index.php/campaign/whatsapp_campaign/create/whatsapp/regular",
+  "values": {
+    "campaign_name": "agent_test",
+    "waba": "1730519403808933",
+    "business_number": "Bajaj Markets (+91 8422973254)",
+    "tags": "test"
+  }
+}

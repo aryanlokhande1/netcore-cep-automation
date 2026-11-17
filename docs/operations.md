@@ -1,0 +1,89 @@
+# Setup and operation
+
+Status: IMPLEMENTED — NOT LIVE VERIFIED. No command below was executed during the
+implementation assignment. Separate live/provider authorization is required.
+
+## Environment
+
+Use the existing Windows source checkout, Python 3.11+ and installed headed
+Chromium. pyproject.toml and requirements.lock.txt retain the existing stack.
+tzdata==2026.6 is pinned for Windows ZoneInfo support; the active environment resolves
+Asia/Kolkata. Login still uses its private broker and existing independent evidence
+verifier. A writable checkout remains required.
+
+Do not run synthetic, mocked, fixture or simulated browser tests. Static review
+means AST parsing, import/path/CLI inspection and hash comparison. Focused environment
+checks may validate ZoneInfo and the actual approved payload; do not execute workflows.
+
+## Before an authorized V2 run
+
+1. Preserve the approved private schedule: 17 November 2026, 16:00 Asia/Kolkata.
+2. Approve the exact payload SHA-256; if the schedule expires, stop for a new value.
+3. UI evidence is incremental and optional at startup. When supplying a document,
+   approve its exact SHA-256. No future selectors or record endpoints are invented.
+4. Supply existing Login evidence, or use --review-login-evidence in an interactive
+   terminal. The existing passive discovery and D/P/A digest review operate in the
+   same owned Login session. Missing proof never counts as authenticated.
+5. Only after independent authentication can the task inspect actual current UI.
+   Without reviewed campaign identity/record proof it stays read-only on the observed
+   authenticated view; it does not enter creation or edit campaign values.
+6. Before creation/edits, establish exact no-existing-campaign proof. Before each
+   save require current-stage field/control identity and independent saved-field
+   mappings; final draft verification requires every requested saved value.
+7. Review browser/provider/request/token limits and the unapproved skill.
+8. Authorize the intended execution separately from this engineering assignment.
+
+Template only, after those prerequisites:
+
+    python -m app.cli whatsapp --payload credentials/whatsapp-v2-payload.json --approve-payload-sha256 <REVIEWED_PAYLOAD_SHA256> --review-login-evidence --login-review-seconds 120 --authorized-live --authorized-inference --authorized-edits --authorized-persistence --authorized-candidate-evaluation --iterations 1
+
+Optional --login-evidence-file reuses an existing Login evidence document. Otherwise
+review mode reserves a private per-run output destination; no placeholder is created.
+Add --ui-evidence <ACTUAL_REVIEWED_PARTIAL_UI_FILE> --approve-ui-sha256 <EXACT_DIGEST>
+when real evidence is available. No UI file means discovery only after verified Login.
+For a read-only discovery review phase, omit --authorized-edits and
+--authorized-persistence; startup requires only live/inference authorization, while
+creation and persistence remain prohibited independently of supplied UI evidence.
+
+Add --authorized-vision only for reviewed image transmission. Learning additionally
+requires --authorized-learning. Fresh trials additionally require
+--authorized-fresh-iterations --iterations 3 and sufficient configured total budget.
+--candidate selects one exact existing candidate version under evaluation.
+The initial private UI document is intentionally absent; selectors and endpoints
+must come from actual reviewed evidence. These placeholders are not runnable values.
+
+Default total API cap is 24 across the task invocation, also bounded by existing
+model settings and shared token limits. Login is capped separately within that
+budget. Reserve Teacher capacity; exhausted capacity does not authorize a retry.
+Three full executions may need separately reviewed budgets; count limits are not
+a promise that three task attempts will run.
+
+## Stops and recovery
+
+Missing time/authorization blocks before browser startup. Authentication evidence is
+established through the existing verifier/review before task discovery; missing
+current-field/record evidence blocks its state-changing action. Existing campaigns
+block automatic creation/resume. Uncertain writes block replay through a persistent
+journal. A controller lock prevents concurrent canonical task runs; a stale lock
+requires operator review, not automatic removal. Only owned cleanup is performed.
+Review result predicates and actual usage; never infer success from a toast or URL.
+
+New evidence is under outputs/whatsapp-v2/<session ID>/, with a result, structural
+trace and selected skill bytes. Cleanup must report CLOSED_AND_PROFILE_REMOVED.
+Unexpected process/profile uncertainty remains visible and stops further trials.
+
+## Login and retired commands
+
+Existing app.cli live and --login-only retain Login semantics and authorization.
+app.cli whatsapp-contract reports the public V2 contract without task values.
+whatsapp-setup and --doer-only are no longer normal CLI choices.
+app.whatsapp_baseline and old WhatsApp schedulers fail explicitly.
+
+## Source recovery
+
+The source snapshot and original-output hash manifest are under
+outputs/v2-implementation-20261116T111107Z/. Extract source-before.zip into a separate
+staging directory, verify member hashes against manifest.json, and restore only
+reviewed paths. Private payloads/credentials/profiles are excluded. Do not overwrite
+later work or historical outputs. No Git repository was initialized and no commit
+was made.
