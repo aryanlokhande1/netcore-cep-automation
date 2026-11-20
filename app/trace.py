@@ -29,6 +29,7 @@ class Trace:
         if not set(roles)<={'doer','teacher','observer'}:raise ValueError('Unknown model role')
         self.role_usage={r:{'requests':0,'input_tokens':0,'output_tokens':0,'total_tokens':0,'usage_available':False} for r in roles}
         self.agent_trace_enabled=False
+        self.agent_event_sink=None
 
     def enable_agent_trace(self,*,private_values=()):
         """Opt-in V2 reporting through the existing event store; never log prompts."""
@@ -80,6 +81,8 @@ class Trace:
         self.events[-1]['agent_execution']=self.redact_agent({'id':identifier,'kind':kind,
             'run_id':self.run_id,'iteration':self.iteration,'iteration_id':f'{self.run_id}:{self.iteration}','stage':self.agent_stage,
             'phase':self.agent_phase,'role':role,'timestamp':self.events[-1]['timestamp'],**data})
+        if self.agent_event_sink is not None:
+            self.agent_event_sink(self.events[-1]['agent_execution'])
         return identifier
 
     def safe_tool_arguments(self,name,arguments):
@@ -185,6 +188,9 @@ class Trace:
     def lifecycle(self,component,data):
         self.add('diagnostic')
         self.events[-1].update(diagnostic_stage=component,diagnostic=data)
+        if self.agent_trace_enabled and getattr(self,'stream_browser_diagnostics',False):
+            self.agent_event('browser_diagnostic',role='controller',component=component,
+                diagnostic=data,source_event_index=len(self.events)-1)
 
     def tool(self,name,role,phase):
         names={'navigate_approved','inspect_page','interact_observed','submit_login','verify_dashboard',

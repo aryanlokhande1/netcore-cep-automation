@@ -12,6 +12,7 @@ import hashlib
 from pathlib import Path
 from time import monotonic
 from urllib.parse import urlsplit
+from uuid import uuid4
 from app.safety import require_live_browser
 from modules.login.evidence import EvidenceConfig
 from browser.evidence_diagnostics import EvidenceFailure
@@ -27,24 +28,42 @@ NEGATIVE_AUTH_LABELS={'inactive','unauthenticated','logged_out','error','failed'
 
 def identity_facts(data,account):
     """Bounded reduction; only key paths and exact comparison outcomes survive."""
-    auth=[];tenant=[];identity_hashes={};scalar_hashes={};scalar_display={};negative_auth=[];stack=[(data,[],0)];nodes=0;limited=False
+    auth=[];tenant=[];identity_hashes={};scalar_hashes={};scalar_display={};negative_auth=[];stack=[(data,[],0)];nodes=0;limited=False;limit_reason=None
+    structure={'root_type':'OBJECT' if isinstance(data,dict) else 'ARRAY' if isinstance(data,list) else 'SCALAR','objects':0,'arrays':0,'scalar_fields':0,'sensitive_fields_skipped':0,'array_limit_reached':False}
+    array_paths=[];array_contexts={}
     while stack:
         obj,path,depth=stack.pop();nodes+=1
-        if nodes>4096 or depth>8:limited=True;break
+        if nodes>4096 or depth>8:
+            limited=True;limit_reason='NODE_LIMIT' if nodes>4096 else 'DEPTH_LIMIT';break
+        if isinstance(obj,list):
+            structure['arrays']+=1
+            array_paths.append(path)
+            if len(obj)>32:
+                structure['array_limit_reached']=limited=True;limit_reason='ARRAY_MEMBER_LIMIT';break
+            for index,value in reversed(list(enumerate(obj))):
+                if isinstance(value,(dict,list)):stack.append((value,path+[str(index)],depth+1))
+            continue
         if not isinstance(obj,dict):continue
+        structure['objects']+=1
         for key,value in obj.items():
+            nodes+=1
+            if nodes>4096:limited=True;limit_reason='NODE_LIMIT';break
             if not isinstance(key,str) or len(key)>80:continue
-            if any(part in key.lower() for part in ('password','token','secret','cookie','authorization','credential')):continue
+            if any(part in key.lower() for part in ('password','token','secret','cookie','authorization','credential')):
+                structure['sensitive_fields_skipped']+=1;continue
+            if not isinstance(value,(dict,list)):structure['scalar_fields']+=1
             parts=path+[key]
             pointer='/'+'/'.join(k.replace('~','~0').replace('/','~1') for k in parts)
             reference=key if not path else pointer
             if len(reference)>80:continue
+            array_contexts[reference]=['/'+'/'.join(parts[:len(prefix)+1]) for prefix in array_paths
+                if parts[:len(prefix)]==prefix and len(parts)>len(prefix) and parts[len(prefix)].isdigit()]
             if key.lower() in AUTH_NAMES and value is True:auth.append(reference)
-            if key.lower() in AUTH_REVIEW_FIELDS and all(p.lower() in AUTH_REVIEW_CONTAINERS for p in path):
+            if key.lower() in AUTH_REVIEW_FIELDS and all(p.isdigit() or p.lower() in AUTH_REVIEW_CONTAINERS for p in path):
                 if ((type(value) is str and value in NEGATIVE_AUTH_LABELS) or
                         (key.lower() in AUTH_NAMES|{'success'} and (value is False or type(value) is int and value==0))):
                     negative_auth.append(reference)
-            if (key.lower() in AUTH_REVIEW_FIELDS and all(p.lower() in AUTH_REVIEW_CONTAINERS for p in path)
+            if (key.lower() in AUTH_REVIEW_FIELDS and all(p.isdigit() or p.lower() in AUTH_REVIEW_CONTAINERS for p in path)
                     and type(value) in (bool,int,str) and len(str(value))<=256):
                 scalar_hashes[reference]=hashlib.sha256(json.dumps(value,ensure_ascii=True,separators=(',',':')).encode()).hexdigest()
                 # Only neutral status labels and tiny scalar flags may be shown
@@ -53,8 +72,14 @@ def identity_facts(data,account):
                     scalar_display[reference]=value
             if isinstance(value,str) and any(t in key.lower() for t in ('tenant','account','company','organization','organisation')):identity_hashes[reference]=hashlib.sha256(value.encode()).digest()
             if any(t in key.lower() for t in ('tenant','account','company','organization','organisation')) and isinstance(value,str) and value==account:tenant.append(reference)
-            if isinstance(value,dict):stack.append((value,parts,depth+1))
-    return {'auth_keys':[] if limited else auth,'tenant_keys':[] if limited else tenant,'traversal_limit_reached':limited,'identity_hashes':{} if limited else identity_hashes,'scalar_hashes':{} if limited else scalar_hashes,'scalar_display':{} if limited else scalar_display,'negative_authentication_keys':[] if limited else negative_auth}
+            if isinstance(value,(dict,list)):stack.append((value,parts,depth+1))
+    return {'structure':structure,'array_contexts':{} if limited else array_contexts,'auth_keys':[] if limited else auth,'tenant_keys':[] if limited else tenant,'traversal_limit_reached':limited,'traversal_limit_reason':limit_reason,'identity_hashes':{} if limited else identity_hashes,'scalar_hashes':{} if limited else scalar_hashes,'scalar_display':{} if limited else scalar_display,'negative_authentication_keys':[] if limited else negative_auth}
+
+
+def resource_pair_supported(facts,authentication_key,tenant_key):
+    """Never combine authentication and tenant identities across array members."""
+    contexts=facts.get('array_contexts',{})
+    return contexts.get(authentication_key,[])==contexts.get(tenant_key,[])
 
 
 def timestamp():
@@ -118,7 +143,12 @@ async def certify_custom_host_scope(browser,snapshot,expression):
             latest=await browser.page.evaluate(expression)
             negative=await browser.page.evaluate(NEGATIVE_SNAPSHOT.replace('SETTINGS',json.dumps({'origins':sorted(browser.policy.origins)})))
         async with metadata_channel(browser,before[1]) as reader:
-            inventory=await shadow_inventory(reader,before[1],browser.policy.origins,observe=observe)
+            optional={}
+            if getattr(browser,'rendering_diagnostics_enabled',False):
+                from browser.diagnostics import closed_host_render_state
+                async def observe_host(backend):return await closed_host_render_state(browser,backend)
+                optional['host_observer']=observe_host
+            inventory=await shadow_inventory(reader,before[1],browser.policy.origins,observe=observe,primary_frame=before[4],**optional)
         current=latest.get('_scope_diagnostics',latest)
         relevant_keys=('dashboard','tenant_matches','mismatch')
         relevant_stable=all(type(snapshot.get(k)) is bool and snapshot.get(k)==latest.get(k) for k in relevant_keys)
@@ -142,7 +172,8 @@ async def certify_custom_host_scope(browser,snapshot,expression):
 
 
 class ReadOnlyDiscovery:
-    def __init__(self,browser):
+    def __init__(self,browser,*,targeted_capture=False):
+        self.targeted_capture=targeted_capture
         self.browser=browser;self.requests={};self.resources=[];self.enabled=False;self.channel=None
         self.tasks=set();self.closed=False;self.serial=0;self.latest_requests={}
         self.slots=asyncio.Semaphore(4)
@@ -151,6 +182,10 @@ class ReadOnlyDiscovery:
         self.context_changed=asyncio.Event()
         self.navigation_listener=None;self.previous_navigation_listener=None
         self.contract_choices=[];self.contract_choices_digest=None
+        self._operator_candidate_refs={}
+        self._operator_candidate_summaries={}
+        self._operator_candidate_context=None
+        self._operator_candidate_error=None
 
     def eligible(self,url):
         parsed=urlsplit(url)
@@ -218,7 +253,8 @@ class ReadOnlyDiscovery:
                 if response.get('base64Encoded'):body=base64.b64decode(body,validate=True).decode('utf-8')
                 if len(body.encode('utf-8'))>262144:item['state']='BODY_TOO_LARGE';return
                 data=json.loads(body)
-                if not isinstance(data,dict):item['state']='JSON_OBJECT_REQUIRED';return
+                item['structure']={'root_type':'OBJECT' if isinstance(data,dict) else 'ARRAY' if isinstance(data,list) else 'SCALAR'}
+                if not isinstance(data,(dict,list)):item['state']='JSON_OBJECT_REQUIRED';return
                 expected=self.browser.expected_account
                 if expected is None:item['state']='EXPECTED_ACCOUNT_UNAVAILABLE';return
                 account=expected.get_secret_value()
@@ -226,6 +262,11 @@ class ReadOnlyDiscovery:
                     from modules.login.evidence import reviewed_account
                     account=reviewed_account(self.browser.evidence,account)
                 item['facts']=identity_facts(data,account)
+                if self.targeted_capture:
+                    from browser.login_signal_capture import inspect_identity_branches, safe_request_locator
+
+                    item['targeted_capture'] = {'request': safe_request_locator(item['path']),
+                                                **inspect_identity_branches(data, account)}
                 auth=item['facts']['auth_keys'];tenant=item['facts']['tenant_keys']
                 item['support']=('NEGATIVE_AUTHENTICATION_RESOURCE' if item['facts']['negative_authentication_keys'] else 'AUTHENTICATED_TRUE_MISSING' if not auth else 'EXACT_TENANT_MISSING' if not tenant else
                     'AMBIGUOUS_INDICATOR_KEYS' if len(auth)!=1 or len(tenant)!=1 else 'EXPLICIT_AUTH_AND_EXACT_TENANT')
@@ -299,6 +340,37 @@ class ReadOnlyDiscovery:
         if monotonic()-item.get('captured',0)>120:return 'CAPTURE_EXPIRED'
         return 'CURRENT_DOCUMENT'
 
+    def resource_diagnostics(self, operator_window_started=None):
+        resource_diagnostics = []
+        for item in self.resources:
+            facts = item.get('facts', {})
+            captured = item['state'] == 'CAPTURED'
+            truncated = facts.get('traversal_limit_reached', False)
+            assessed = captured and not truncated
+            resource_diagnostics.append({
+                'resource': item['alias'], 'state': item['state'], 'query_bearing': '?' in item['path'],
+                'support': ('AUTH_TENANT_INDICATORS_UNCHECKED_TRAVERSAL_LIMIT' if truncated
+                            else item.get('support', 'NO_SUPPORTED_FACTS')),
+                'document_status': self.current_resource(item) if captured else 'NOT_CHECKED',
+                'authenticated_indicator_count': len(facts.get('auth_keys', [])) if assessed else None,
+                'exact_tenant_indicator_count': len(facts.get('tenant_keys', [])) if assessed else None,
+                'json_traversal_limit_reached': truncated,
+                'observed_during_operator_window': operator_window_started is not None
+                    and item['started'] >= operator_window_started,
+            })
+        return resource_diagnostics
+
+    def targeted_resource_diagnostics(self, operator_window_started=None):
+        from browser.login_signal_capture import safe_request_locator
+
+        return [
+            {**row, **item.get('targeted_capture', {}),
+             'request': safe_request_locator(item['path']),
+             'legacy_traversal_limit': item.get('facts', {}).get('traversal_limit_reason'),
+             'cache_source': item.get('cache_source', 'UNKNOWN')}
+            for row, item in zip(self.resource_diagnostics(operator_window_started), self.resources)
+        ]
+
     def check_resource(self,evidence):
         # No body re-read, endpoint request, reconnect or session-ID substitution.
         if not self.channel or not self.channel.ready or self.channel.failure:return False,'DISCOVERY_TRANSPORT_UNAVAILABLE'
@@ -310,6 +382,8 @@ class ReadOnlyDiscovery:
         state=self.current_resource(item)
         if state!='CURRENT_DOCUMENT':return False,state
         facts=item['facts']
+        if not resource_pair_supported(facts,evidence.authenticated_json_key,evidence.tenant_json_key):
+            return False,'RESOURCE_IDENTITY_CONTEXT_MISMATCH'
         if facts.get('negative_authentication_keys'):return False,'NEGATIVE_AUTHENTICATION_RESOURCE'
         if evidence.authenticated_value_sha256:
             if facts.get('scalar_hashes',{}).get(evidence.authenticated_json_key)!=evidence.authenticated_value_sha256:
@@ -322,16 +396,142 @@ class ReadOnlyDiscovery:
         elif evidence.tenant_json_key not in facts['tenant_keys']:return False,'READONLY_TENANT_MISMATCH'
         return True,'PASSIVE_AUTHENTICATED_JSON_CONFIRMED'
 
-    async def prepare(self):
+    @staticmethod
+    def _operator_context(context):
+        if not context or context.get('primary_document_coherent') is not True:return None
+        keys=('primary_target_alias','primary_session_alias','generation','document_generation','page_path_sha256')
+        value=tuple(context.get(key) for key in keys)
+        return value if all(item is not None for item in value) else None
+
+    @staticmethod
+    def _candidate_target_key(candidate):
+        if not isinstance(candidate,dict) or not isinstance(candidate.get('selector'),str):return None
+        return (candidate['selector'],tuple(candidate.get('frame_selectors') or ()),
+            tuple(candidate.get('shadow_selectors') or ()))
+
+    @staticmethod
+    def _candidate_sample_signature(sample):
+        keys=('element_type','role','selector_eligible','frame_depth','shadow_depth',
+            'potential_dashboard','potential_navigation','expected_account_match','collector_gate')
+        return tuple(sample.get(key) for key in keys)+(tuple(sample.get('scope_exclusions') or ()),)
+
+    def _store_operator_candidates(self,dom,targets,expression,page_context):
+        self._operator_candidate_refs={};self._operator_candidate_summaries={}
+        self._operator_candidate_context=self._operator_context(page_context)
+        self._operator_candidate_error=None
+        if self._operator_candidate_context is None:return
+        diagnostics=dom.get('dom_diagnostics',{})
+        samples=diagnostics.get('semantic_samples',[])
+        samples_by_ref={sample.get('element_ref'):sample for sample in samples if isinstance(sample,dict)}
+        targets_by_ref={target.get('element_ref'):target for target in targets if isinstance(target,dict)}
+        snapshot=uuid4().hex
+
+        def add(kind,sample,target,candidate=None):
+            number=1+sum(record['kind']==kind for record in self._operator_candidate_refs.values())
+            reference=f'candidate-{snapshot}-{kind}-{number}'
+            target_key=self._candidate_target_key(target)
+            summary={
+                'reference':reference,
+                'kind':kind,
+                'visible':sample.get('visible') if sample else False,
+                'element_type':sample.get('element_type','UNAVAILABLE') if sample else 'UNAVAILABLE',
+                'role':sample.get('role','OTHER_OR_ABSENT') if sample else 'OTHER_OR_ABSENT',
+                'collector_gate':sample.get('collector_gate','REFERENCE_NOT_CAPTURED') if sample else 'REFERENCE_NOT_CAPTURED',
+                'scope':'SHADOW_OR_FRAME' if sample and (sample.get('frame_depth',0) or sample.get('shadow_depth',0)) else 'TOP_LEVEL',
+                'binding_available':bool(target_key and sample and sample.get('selector_eligible') is True),
+                'confidence':candidate.get('confidence') if candidate else 'OPERATOR_INSPECTION_ONLY',
+            }
+            self._operator_candidate_refs[reference]={
+                'reference':reference,'kind':kind,'sample':dict(sample) if sample else None,
+                'target':dict(target) if target else None,'target_key':target_key,
+                'candidate':dict(candidate) if candidate else None,
+                'expression':expression,'context':self._operator_candidate_context,
+            }
+            self._operator_candidate_summaries[reference]=summary
+
+        for kind in ('dashboard','tenant','navigation'):
+            candidates=dom.get(f'{kind}_candidates',[])
+            for candidate in candidates:
+                target_key=self._candidate_target_key(candidate)
+                target=next((item for item in targets if self._candidate_target_key(item)==target_key),None)
+                sample=samples_by_ref.get(target.get('element_ref')) if target else None
+                add(kind,sample,target,candidate)
+        for sample in samples:
+            target=targets_by_ref.get(sample.get('element_ref'))
+            add('sample',sample,target)
+
+    async def operator_candidates(self,kind):
+        self.authorize()
+        if kind not in {'dashboard','tenant','navigation','sample'}:
+            raise ValueError('Unsupported operator candidate type')
+        if self._operator_candidate_context is None:
+            raise EvidenceFailure(self._operator_candidate_error or 'CANDIDATE_DOCUMENT_UNVERIFIED')
+        await self.protected(consume=False)
+        context=await login_page_context(self.browser)
+        if self._operator_context(context)!=self._operator_candidate_context:
+            raise EvidenceFailure('CANDIDATE_REFERENCE_STALE')
+        return [dict(summary) for summary in self._operator_candidate_summaries.values()
+            if summary['kind']==kind]
+
+    async def bind_candidate(self,reference):
+        self.authorize()
+        if not isinstance(reference,str):
+            raise EvidenceFailure('CANDIDATE_REFERENCE_UNOBSERVED')
+        record=self._operator_candidate_refs.get(reference)
+        if record is None:raise EvidenceFailure('CANDIDATE_REFERENCE_UNOBSERVED')
+        if not record['target'] or not record['sample'] or not record['target_key']:
+            raise EvidenceFailure('CANDIDATE_REFERENCE_UNRESOLVABLE')
+        if record['sample'].get('visible') is not True:
+            raise EvidenceFailure('CANDIDATE_NOT_VISIBLE')
+        await self.protected()
+        context=await login_page_context(self.browser)
+        if self._operator_context(context)!=record['context']:
+            raise EvidenceFailure('CANDIDATE_REFERENCE_STALE')
+        current=await self.browser.page.evaluate(record['expression'])
+        await self.protected(consume=False)
+        final_context=await login_page_context(self.browser)
+        if self._operator_context(final_context)!=record['context']:
+            raise EvidenceFailure('CANDIDATE_REFERENCE_STALE')
+        diagnostics=current.get('dom_diagnostics',{})
+        sample=next((item for item in diagnostics.get('semantic_samples',[])
+            if item.get('element_ref')==record['sample'].get('element_ref')),None)
+        if sample is None:raise EvidenceFailure('CANDIDATE_REFERENCE_STALE')
+        if sample.get('visible') is not True:raise EvidenceFailure('CANDIDATE_NOT_VISIBLE')
+        if self._candidate_sample_signature(sample)!=self._candidate_sample_signature(record['sample']):
+            raise EvidenceFailure('CANDIDATE_REFERENCE_STALE')
+        target=next((item for item in current.get('_render_targets',[])
+            if item.get('element_ref')==record['sample'].get('element_ref')),None)
+        if self._candidate_target_key(target)!=record['target_key']:
+            raise EvidenceFailure('CANDIDATE_REFERENCE_STALE')
+        kind=record['kind']
+        if kind!='sample' and not any(self._candidate_target_key(item)==record['target_key']
+                for item in current.get(f'{kind}_candidates',[])):
+            raise EvidenceFailure('CANDIDATE_CLASSIFICATION_CHANGED')
+        return {
+            'reference':reference,
+            'kind':kind,
+            'state':'CURRENT_VISIBLE_DOM_REFERENCE',
+            'visible':True,
+            'document_generation':final_context.get('document_generation'),
+            'scope':self._operator_candidate_summaries[reference]['scope'],
+            'collector_gate':sample.get('collector_gate'),
+            'selector_sha256':hashlib.sha256(target['selector'].encode('utf-8')).hexdigest(),
+        }
+
+    async def prepare(self, *, calibration_only=False, operator_window_started=None):
+        initial_epoch = self.navigation_epoch
         self.contract_choices=[];self.contract_choices_digest=None
         self.authorize();await self.protected(consume=False)
         browser=self.browser
+        initial_page_context=await login_page_context(browser)
+        initial_candidate_context=self._operator_context(initial_page_context)
         account=browser.expected_account.get_secret_value() if browser.expected_account else ''
         if browser.evidence:
             from modules.login.evidence import reviewed_account
             account=reviewed_account(browser.evidence,account)
         settings={'account':account,
-            'origins':sorted(browser.policy.origins)}
+            'origins':sorted(browser.policy.origins),'calibration':calibration_only,
+            'targeted_capture':calibration_only and self.targeted_capture}
         expression=DOM_DISCOVERY.replace('SETTINGS',json.dumps(settings))
         dom={}
         # Three snapshots in the existing protected page, no navigation or HTTP calls.
@@ -343,6 +543,25 @@ class ReadOnlyDiscovery:
         await self.protected(consume=False)
         page_context=await login_page_context(browser)
         dom,scope_certificate=await certify_custom_host_scope(browser,dom,expression)
+        page_context=await login_page_context(browser)
+        candidate_context_stable=(
+            initial_candidate_context is not None and
+            initial_candidate_context==self._operator_context(page_context)
+        )
+        if getattr(browser,'rendering_diagnostics_enabled',False):
+            snapshot_hash=hashlib.sha256(json.dumps(dom.get('dom_diagnostics',{}),sort_keys=True).encode()).hexdigest()
+            comparison_key=(page_context.get('document_generation'),page_context.get('page_path_sha256'),snapshot_hash)
+            if getattr(self,'render_comparison_key',None)!=comparison_key and getattr(self,'render_comparison_count',0)<2:
+                from browser.diagnostics import ScreenshotDiagnostics
+                self.rendered_ui_comparison=await ScreenshotDiagnostics(browser).compare(dom,scope_certificate,enabled=True)
+                self.render_comparison_key=comparison_key
+                self.render_comparison_count=getattr(self,'render_comparison_count',0)+1
+            elif getattr(self,'render_comparison_key',None)!=comparison_key:
+                self.rendered_ui_comparison={**getattr(self,'rendered_ui_comparison',{}),
+                    'status':'STALE_DIAGNOSTIC_NOT_CURRENT_PROOF','matches_current_dom':False}
+            browser.rendered_ui_comparison=self.rendered_ui_comparison
+        comparison=getattr(self,'rendered_ui_comparison',{})
+        targets=dom.pop('_render_targets',[])
         available=bool(self.channel and getattr(self.channel,'ready',False) and not self.channel.failure)
         dashboards=dom.get('dashboard_candidates',[]);tenants=dom.get('tenant_candidates',[]);navigation=dom.get('navigation_candidates',[])
         shells=[d for d in dashboards if d['kind']=='APPLICATION_SHELL']
@@ -360,21 +579,74 @@ class ReadOnlyDiscovery:
         for item in latest.values():
             if item['state']!='CAPTURED':continue
             facts=item['facts'];auth_count+=bool(facts['auth_keys']);tenant_count+=bool(facts['tenant_keys'])
-            if '?' not in item['path'] and not facts.get('negative_authentication_keys') and len(facts['auth_keys'])==len(facts['tenant_keys'])==1 and self.current_resource(item)=='CURRENT_DOCUMENT':
+            if '?' not in item['path'] and not facts.get('negative_authentication_keys') and len(facts['auth_keys'])==len(facts['tenant_keys'])==1 and self.current_resource(item)=='CURRENT_DOCUMENT' and resource_pair_supported(facts,facts['auth_keys'][0],facts['tenant_keys'][0]):
                 matches.append({'readonly_path':item['path'],'tenant_json_key':facts['tenant_keys'][0],'authenticated_json_key':facts['auth_keys'][0]})
         observed_at=timestamp()
         for candidate in dashboards+tenants+navigation:
             candidate.update(observed_at=observed_at,provenance='PROTECTED_RENDERED_DOM')
+        if calibration_only:
+            from urllib.parse import quote
+
+            stable = candidate_context_stable and initial_epoch == self.navigation_epoch
+            private_markers = (account, quote(account, safe='')) if account else ()
+            def safe_bindings(records):
+                return [record for record in records
+                        if not any(marker in json.dumps(record, ensure_ascii=False) for marker in private_markers)]
+
+            dashboards = safe_bindings([item for item in selectable_dashboards
+                if item['kind'] in {'CONTENT_HEADING', 'APPLICATION_SHELL'}]) if stable else []
+            tenants = safe_bindings(tenants) if stable and account else []
+            resources = safe_bindings(matches) if stable and available else []
+            labels = safe_bindings(dom.get('calibration_tenant_labels', [])) if stable and account else []
+            resource_diagnostics = self.resource_diagnostics(operator_window_started)
+            failed_checks = [
+                code for passed, code in (
+                    (stable, 'PROTECTED_DOCUMENT_CONTEXT_CHANGED'),
+                    (available, 'PASSIVE_RESOURCE_TRANSPORT_UNAVAILABLE'),
+                    (len(dashboards) == 1, 'UNIQUE_VISIBLE_DASHBOARD_MARKER_UNAVAILABLE'),
+                    (len(tenants) == 1, 'UNIQUE_VISIBLE_EXACT_TENANT_MARKER_UNAVAILABLE'),
+                    (len(resources) == 1, 'CURRENT_AUTHENTICATED_EXACT_TENANT_RESOURCE_UNAVAILABLE'),
+                ) if not passed]
+            targeted = {}
+            if self.targeted_capture:
+                targeted = {
+                    'targeted_dom': dom.get('targeted_capture', {}) if stable else {'status': 'DOCUMENT_CHANGED'},
+                    'targeted_resources': self.targeted_resource_diagnostics(operator_window_started),
+                    'document_context_stable': stable,
+                    'passive_transport_available': available,
+                }
+            return {
+                'status': 'SIGNALS_UNRESOLVED' if failed_checks else 'CANDIDATES_PRESENT',
+                **targeted,
+                'authentication_verified': False, 'failed_checks': failed_checks,
+                'page_context': page_context, 'scope_certificate': scope_certificate,
+                'readiness': getattr(browser, 'login_readiness', None),
+                'dom_diagnostics': dom.get('dom_diagnostics', {}),
+                'resource_diagnostics': resource_diagnostics,
+                'dashboard_candidates': dashboards, 'tenant_candidates': tenants,
+                'calibration_tenant_labels': labels,
+                'read_only_resources': resources, 'network_requests_replayed': 0,
+            }
+        self._store_operator_candidates(dom,targets,expression,page_context if candidate_context_stable else None)
+        if not candidate_context_stable:
+            current_candidate_context=self._operator_context(page_context)
+            self._operator_candidate_error=(
+                'CANDIDATE_REFERENCE_STALE' if initial_candidate_context is not None and current_candidate_context is not None
+                else 'CANDIDATE_DOCUMENT_UNVERIFIED'
+            )
         path=Path(browser.config.evidence_file);path.parent.mkdir(parents=True,exist_ok=True)
         inventory={'reviewed':False,'source_run_id':browser.trace.run_id,'observed_at':observed_at,
             'provenance':'PROTECTED_RENDERED_DOM_AND_COMPLETED_PASSIVE_GET',
             'page_context':page_context,'scope_certificate':scope_certificate,
             'dashboard_candidates':dashboards,'navigation_candidates':navigation,'tenant_candidates':tenants,
+            'dom_diagnostics':dom.get('dom_diagnostics',{}),
+            'rendered_ui_comparison':comparison,
             'dashboard_selectors':dom.get('dashboard_selectors',[]),'tenant_selectors':dom.get('tenant_selectors',[]),
             'observed_json_get_paths':[p for p in latest if '?' not in p], 'query_resources_observed':sum('?' in p for p in latest),'supported_json_indicators':[
                 {**m,'source_resource':latest[m['readonly_path']]['alias'],
                     'captured_at':latest[m['readonly_path']].get('captured_at'),'provenance':'COMPLETED_PASSIVE_GET'} for m in matches],
             'resource_diagnostics':[{'resource':r['alias'],'state':r['state'],'observed_at':r['observed_at'],
+                'structure':r.get('facts',{}).get('structure',r.get('structure',{})),'support':r.get('support','NO_SUPPORTED_FACTS'),
                 'query_bearing':'?' in r['path'],'nested_identity_paths':bool(r.get('facts',{}).get('auth_keys') and any(k.startswith('/') for k in r['facts']['auth_keys'])), 'json_traversal_limit_reached':r.get('facts',{}).get('traversal_limit_reached',False),
                 'authenticated_indicator_count':len(r.get('facts',{}).get('auth_keys',[])),
                 'exact_tenant_indicator_count':len(r.get('facts',{}).get('tenant_keys',[])),
@@ -390,6 +662,7 @@ class ReadOnlyDiscovery:
         for name in ('permitted_frames_unavailable','document_limit_reached','node_limit_reached','shadow_roots_uninspected','inaccessible_or_unknown_hosts','shadow_limit_reached'):
             if name=='inaccessible_or_unknown_hosts' and scope_certificate.get('certified') is True:continue
             if dom.get(name):limitations.append(name.upper())
+        if not candidate_context_stable:limitations.append('CANDIDATE_DOCUMENT_CHANGED_DURING_OBSERVATION')
         if not page_context.get('primary_document_coherent'):limitations.append('LOGIN_PAGE_CONTEXT_UNVERIFIED')
         # A private unreviewed candidate is input to verification, not its result.
         # Requiring the final custom-host certificate here is circular: scoped
@@ -412,6 +685,7 @@ class ReadOnlyDiscovery:
                         if '?' in item['path'] or item['state']!='CAPTURED' or facts.get('negative_authentication_keys') or self.current_resource(item)!='CURRENT_DOCUMENT' or len(facts.get('tenant_keys',[]))!=1:continue
                         for key,value in facts.get('scalar_display',{}).items():
                             if key in facts['auth_keys'] or len(self.contract_choices)>=9:continue
+                            if not resource_pair_supported(facts,key,facts['tenant_keys'][0]):continue
                             binding={**fields,'readonly_path':item['path'],'tenant_json_key':facts['tenant_keys'][0],
                                 'authenticated_json_key':key,'authenticated_value_sha256':facts['scalar_hashes'][key]}
                             self.contract_choices.append({'resource':item['alias'],'context':context,
@@ -426,6 +700,11 @@ class ReadOnlyDiscovery:
         if len(dashboards)==1 and dashboards[0]['kind']=='UNSCOPED_HEADING':gaps.append('DASHBOARD_CONTEXT_REQUIRES_OPERATOR_REVIEW')
         return {'status':'PENDING_OPERATOR_OBSERVATION' if gaps else 'DISCOVERED_UNREVIEWED',
             'transport_status':'AVAILABLE' if available else 'UNAVAILABLE','dashboard_candidates':len(dashboards),
+            'dom_diagnostics':dom.get('dom_diagnostics',{}),'resource_diagnostics':inventory['resource_diagnostics'],
+            'rendered_ui_comparison':comparison,
+            'render_comparison_status':comparison.get('status','NOT_ENABLED'),
+            'render_comparison_screenshot':comparison.get('screenshot_status','NOT_CAPTURED'),
+            'render_comparison_ax_ignored':comparison.get('ax_ignored'),
             'tenant_candidates':len(tenants),'navigation_candidates':len(navigation),'observed_json_resources':len(self.resources),
             'candidate_type_counts':{'dashboard':dict(Counter(c['kind'] for c in dashboards)),
                 'tenant':dict(Counter(c['kind'] for c in tenants)),'navigation':dict(Counter(c['kind'] for c in navigation))},
@@ -437,6 +716,7 @@ class ReadOnlyDiscovery:
             'resource_document_status_counts':dict(Counter(self.current_resource(r) for r in self.resources if r['state']=='CAPTURED')),
             'json_support_counts':dict(Counter(r['support'] for r in self.resources if r['state']=='CAPTURED')),
             'permitted_frames_unavailable':dom.get('permitted_frames_unavailable',0),
+            'external_frames_skipped':dom.get('external_frames_skipped',0),
             'open_shadow_roots_inspected':dom.get('open_shadow_roots_inspected',0),'inaccessible_or_unknown_hosts':dom.get('inaccessible_or_unknown_hosts',0),'shadow_roots_uninspected':dom.get('shadow_roots_uninspected',0),'node_limit_reached':dom.get('node_limit_reached',False),'shadow_limit_reached':dom.get('shadow_limit_reached',False),'query_resources_observed':sum('?' in p for p in latest),'closed_root_coverage':'NOT_ESTABLISHED_BY_DOM',
             'observation_samples':self.sample_count,'confidence_limitations':limitations+['CANDIDATES_ARE_NOT_AUTHENTICATION_PROOF','TENANT_REQUIRES_EXACT_EXPECTED_ACCOUNT','RESOURCE_CONTRACT_REQUIRES_EXPLICIT_REVIEW'],
             'browser_actions_remaining':max(0,browser.config.max_actions-browser.trace.actions),

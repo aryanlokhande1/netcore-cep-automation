@@ -44,6 +44,38 @@ async def run(args):
     if args.command=='whatsapp':
         from modules.whatsapp.workflow import run_v2
         print(json.dumps(await run_v2(args),indent=2));return
+    if args.command=='whatsapp-login-capture':
+        from modules.whatsapp.login_capture import run_login_capture
+        await run_login_capture(args.authorized_live,dashboard_only=args.dashboard_only);return
+    if args.command=='whatsapp-human-assisted':
+        from modules.whatsapp.workflow import run_human_assisted
+        runs = args.operator_confirmed_runs
+        if runs != 1 and not args.operator_confirmed_login:
+            raise ConfigurationError('Multiple headed runs require explicit operator-confirmed mode')
+        if not args.operator_confirmed_login:
+            print(json.dumps(await run_human_assisted(args), indent=2))
+            return
+        for index in range(1, runs + 1):
+            print(f'OPERATOR_CONFIRMED_RUN {index}/{runs}', flush=True)
+            result = await run_human_assisted(args)
+            evaluation = result.get('evaluation') or {}
+            print('OPERATOR_RUN_SUMMARY ' + json.dumps({
+                'attempt': index,
+                **{key: result.get(key) for key in ('run_id', 'status', 'login_verification',
+                   'authentication_verified', 'last_verified_step', 'written_fields', 'verified_fields',
+                   'teacher_status', 'failure', 'cleanup', 'artifact_directory', 'login_doer_outcome',
+                   'audience_transition')},
+                'write_results': evaluation.get('write_results', []),
+            }), flush=True)
+            failure = result.get('failure') or {}
+            if (result.get('cleanup') != 'CLOSED_AND_PROFILE_REMOVED' or failure.get('unsafe')
+                    or failure.get('code') == 'OPERATOR_CANCELLED'):
+                print('OPERATOR_BATCH_STOPPED', flush=True)
+                break
+            if result.get('status') == 'STUCK' and result.get('teacher_status') != 'ANALYZED':
+                print('OPERATOR_BATCH_STOPPED TEACHER_REVIEW_UNAVAILABLE', flush=True)
+                break
+        return
     if args.command=='whatsapp-setup':
         raise ConfigurationError('RETIRED_WHATSAPP_PATH: use app.cli whatsapp')
         from modules.whatsapp.contract import Phase1Limits,Page1Limits
@@ -111,9 +143,28 @@ async def run(args):
     if args.command=='readiness':
         print(json.dumps(readiness(cfg),indent=2));return
     if args.command=='live':
+        from dataclasses import replace
+
+        calibration = getattr(args, 'calibrate_whatsapp_login', False)
+        if calibration:
+            if (not args.login_only or args.review_evidence or args.evidence_review_file
+                    or args.hold_seconds or args.approve_origin or args.diagnostics):
+                raise ConfigurationError('WhatsApp Login calibration requires the isolated Login-only mode.')
+            result = await run_live(replace(cfg, max_actions=120, headless=False, evidence_file=None),
+                args.task, args.authorized_live, args.api_request_budget,
+                teacher_request_budget=0, review=False, learning=False,
+                evidence_review=False, login_calibration=True)
+            calibration_report = result.get('login_calibration') or {
+                'run_id': result.get('run_id'), 'status': 'BLOCKED', 'authentication_verified': False,
+                'failed_checks': [result.get('error') or result.get('reason_code') or 'CALIBRATION_NOT_CAPTURED'],
+            }
+            print(json.dumps(calibration_report, indent=2))
+            return
         if args.evidence_review_file:
-            from dataclasses import replace
             cfg=replace(cfg,evidence_file=args.evidence_review_file)
+        if args.login_only and args.review_evidence:
+            # Readiness, final verification and held discovery share this cap.
+            cfg = replace(cfg, max_actions=120)
         result=await run_live(cfg,args.task,args.authorized_live,args.api_request_budget,
             tuple(args.approve_origin),args.hold_seconds,args.diagnostics,
             teacher_request_budget=0 if args.login_only else args.teacher_request_budget,
@@ -165,6 +216,40 @@ def build_parser():
     whatsapp.add_argument('--total-api-budget',type=int,default=24)
     whatsapp.add_argument('--max-turns',type=int,default=20)
     whatsapp.add_argument('--session-seconds',type=int,default=900)
+    login_capture=sub.add_parser('whatsapp-login-capture',help='Capture passive Login signals after operator sign-in')
+    login_capture.add_argument('--authorized-live',action='store_true')
+    login_capture.add_argument('--dashboard-only',action='store_true')
+    human_assisted=sub.add_parser('whatsapp-human-assisted',
+        help='One headed Login attempt and consent-gated WhatsApp Doer diagnostic (read-only by default)')
+    for permission in ('live','inference','candidate-evaluation'):
+        human_assisted.add_argument('--authorized-'+permission,action='store_true')
+    human_assisted.add_argument('--manual-form-test',action='store_true',
+        help='Authorize fixed-payload Setup field entry without persistence; authentication remains independently verified')
+    login_mode = human_assisted.add_mutually_exclusive_group()
+    login_mode.add_argument('--operator-login', action='store_true',
+        help='Sign in personally in the owned browser, then independently verify the same session before Setup')
+    login_mode.add_argument('--operator-confirmed-login', action='store_true',
+        help='Explicit operator tenant confirmation in the protected tab, followed by separate Setup write approval')
+    human_assisted.add_argument('--operator-confirmed-runs', type=int, choices=(1, 2, 3), default=1)
+    human_assisted.add_argument('--page1-through-audience', action='store_true')
+    human_assisted.add_argument('--through-schedule', action='store_true')
+    human_assisted.add_argument('--authorized-learning',action='store_true',
+        help='Reserve one Teacher review and permit an unapproved candidate after recoverable failure; no live retry')
+    human_assisted.add_argument('--login-api-budget',type=int,default=6)
+    human_assisted.add_argument('--task-api-budget',type=int,default=12)
+    human_assisted.add_argument('--total-api-budget',type=int,default=20)
+    human_assisted.add_argument('--browser-actions',type=int,default=300)
+    human_assisted.add_argument('--max-turns',type=int,default=20)
+    human_assisted.add_argument('--doer-tool-budget',type=int,default=160)
+    human_assisted.add_argument('--browser-operation-seconds',type=int,default=30)
+    strategy = human_assisted.add_mutually_exclusive_group()
+    strategy.add_argument('--candidate', help='Evaluate an existing WhatsApp candidate with its exact --candidate-sha256')
+    strategy.add_argument('--baseline-sha256', help='Select the exact WhatsApp module baseline bytes for this run')
+    human_assisted.add_argument('--candidate-sha256', help='Expected SHA-256 of the explicitly selected candidate')
+    human_assisted.add_argument('--operator-review-seconds',type=int,default=300)
+    human_assisted.add_argument('--session-seconds',type=int,default=900)
+    human_assisted.add_argument('--login-evidence-file',
+        help='Optional existing private Login evidence contract; campaign values remain in the approved private payload')
     replay=sub.add_parser('teacher-replay',help='Teacher-only review of saved real evidence; no browser/fixtures/credentials')
     replay.add_argument('--run-id',required=True)
     replay.add_argument('--mode',choices=['openai'],default='openai')
@@ -201,6 +286,8 @@ def build_parser():
     live.add_argument('--teacher-request-budget',type=int,default=2)
     live.add_argument('--review-evidence',action='store_true')
     live.add_argument('--evidence-review-file')
+    live.add_argument('--calibrate-whatsapp-login', action='store_true',
+        help='Collect protected read-only Login signal candidates without approving evidence or starting Setup')
     cycle=sub.add_parser('learn-three')
     cycle.add_argument('--mode',choices=['controlled','live'],default='controlled')
     cycle.add_argument('--learning-runs',type=int,default=3)

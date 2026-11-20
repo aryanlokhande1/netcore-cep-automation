@@ -191,3 +191,59 @@ async def test_existing_interactive_hold_executes_r_selection_p_preview_a_approv
     statuses=[e.get('diagnostic',{}).get('status') for e in b.trace.events]
     assert 'SELECTED_UNREVIEWED' in statuses and 'READY_FOR_EXPLICIT_APPROVAL' in statuses
     assert statuses[-1]=='APPROVED'
+    from modules.whatsapp.workflow import human_assisted_login_evidence
+    evidence, status = human_assisted_login_evidence(b.config.evidence_file)
+    assert evidence.reviewed and status == 'REVIEWED_LOGIN_EVIDENCE_LOADED'
+    assert str(review.path.resolve()) in capsys.readouterr().out
+
+
+def test_navigation_shell_readiness_records_the_landmark_kind():
+    from modules.login.discovery import READINESS_DOM
+    page = {'url': BASE + '/', 'children': [
+        {'tag': 'nav', 'children': [{'tag': 'a', 'attrs': {'href': '/menu'}}]},
+    ]}
+    result = dom_expression(READINESS_DOM, page)
+    assert result['shell'] is True
+    assert result['shell_landmarks'] == ['NAVIGATION_LANDMARK']
+
+
+def test_discovery_terminal_summary_explains_all_three_missing_gates():
+    from pathlib import Path
+    from browser.evidence_review import discovery_terminal_summary
+    path = Path('outputs/83fe26c37156491db24371ea55cb8b07.json')
+    if not path.is_file():
+        pytest.skip('reference trace is local')
+    discovery = json.loads(path.read_bytes())[235]['diagnostic']
+    summary = discovery_terminal_summary(discovery, {})
+    assert summary['dom_rejections']['dashboard'] == {
+        'NOT_VISIBLE': 8, 'TRANSIENT_OR_HIDDEN_SCOPE': 1}
+    assert summary['documents_inspected'] == 1
+    current = next(resource for resource in summary['resources'] if resource['document_status'] == 'CURRENT_DOCUMENT')
+    assert current['query_bearing'] and current['support'] == 'AUTHENTICATED_TRUE_MISSING'
+    assert set(current) <= {'resource', 'state', 'support', 'document_status', 'query_bearing',
+                            'authenticated_indicator_count', 'exact_tenant_indicator_count',
+                            'json_traversal_limit_reached'}
+    assert summary['approval'] == 'REQUIRES_SUCCESSFUL_PREVIEW'
+
+
+async def test_hold_requires_successful_preview_before_approval(tmp_path, monkeypatch, capsys):
+    import sys
+    if sys.platform != 'win32':
+        pytest.skip('Windows review-input branch')
+    import msvcrt
+    import app.config
+    import browser.evidence_review as module
+
+    browser, _ = live_review(tmp_path)
+    browser.discovery = SimpleNamespace(prepare=AsyncMock(return_value={
+        'status': 'PENDING_OPERATOR_OBSERVATION', 'dashboard_candidates': 0}))
+    approve = AsyncMock(side_effect=AssertionError('approval must wait for a successful preview'))
+    monkeypatch.setattr(module.EvidenceReview, 'approve', approve)
+    monkeypatch.setattr(module.sys, 'stdin', SimpleNamespace(isatty=lambda: True))
+    keys = iter(('a', chr(13)))
+    monkeypatch.setattr(msvcrt, 'kbhit', lambda: True)
+    monkeypatch.setattr(msvcrt, 'getwch', lambda: next(keys))
+    monkeypatch.setattr(app.config, 'ROOT', tmp_path)
+    assert await module.evidence_review_hold(browser, 15) is None
+    approve.assert_not_awaited()
+    assert 'PREVIEW_REQUIRED_BEFORE_APPROVAL' in capsys.readouterr().out

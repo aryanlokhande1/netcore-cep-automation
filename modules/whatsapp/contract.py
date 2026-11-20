@@ -220,15 +220,68 @@ STAGE_FIELDS={
     'schedule':('send_type','schedule_datetime','timezone','frequency_cap_enabled','contact_limit_enabled'),
     'preview':(),
 }
+PAGE1_SETUP_FIELDS = ('campaign_name', 'waba', 'business_number', 'tag')
 NEVER_ACTIONS=('publish','activate','send','send_test','save_and_publish')
-V2_CAPABILITIES=MappingProxyType({
-    'click':(('combobox','control'),('native_select','control')),
-    'type':(('text','control'),('checkbox','control'),('datetime_split','control')),
-    'search':(('combobox','search'),),
-    'select':(('native_select','control'),('combobox','option'),('radio','control')),
-    'options':(('native_select','control'),('combobox','control')),
-    'verify':tuple((kind,'control') for kind in ('text','checkbox','native_select','combobox','selected_text','datetime_split','radio')),
+@dataclass(frozen=True)
+class V2BrowserCapability:
+    required:tuple=()
+    allowed:tuple=()
+    targets:tuple|None=None
+    read_only:bool=False
+
+
+# Authoritative V2 registry. Tool action enums, JSON argument constraints and
+# dispatch target validation are all derived from these entries.
+V2_BROWSER_CONTRACT=MappingProxyType({
+    'observe':V2BrowserCapability(read_only=True),
+    'dom':V2BrowserCapability(read_only=True),
+    'screenshot':V2BrowserCapability(read_only=True),
+    'wait':V2BrowserCapability(read_only=True),
+    'inspect':V2BrowserCapability(('reference',),('reference',),read_only=True),
+    'click':V2BrowserCapability(('reference',),('reference','field','screenshot_id','x','y'),
+        (('text','control'),('combobox','control'),('combobox','search'),('native_select','control'))),
+    'type':V2BrowserCapability(('reference','field'),('reference','field'),
+        (('text','control'),('checkbox','control'),('datetime_split','control'))),
+    'scroll':V2BrowserCapability(('reference',),('reference','delta_y'),read_only=True),
+    'options':V2BrowserCapability(('reference',),('reference','field'),
+        (('native_select','control'),('combobox','control')),read_only=True),
+    'search':V2BrowserCapability(('reference','field'),('reference','field'),(('combobox','search'),('combobox','control'))),
+    'select':V2BrowserCapability(('reference','field'),('reference','field'),
+        (('native_select','control'),('combobox','option'),('radio','control'))),
+    'verify':V2BrowserCapability(('reference','field'),('reference','field'),
+        tuple((kind,'control') for kind in ('text','checkbox','native_select','combobox','selected_text','datetime_split','radio')),read_only=True),
+    'navigate':V2BrowserCapability(('reference',),('reference',),read_only=True),
 })
+V2_CAPABILITIES=MappingProxyType({action:spec.targets for action,spec in V2_BROWSER_CONTRACT.items() if spec.targets is not None})
+V2_ACTION_ARGUMENTS=MappingProxyType({action:(spec.required,spec.allowed) for action,spec in V2_BROWSER_CONTRACT.items()})
+_V2_ACTION_NAME=Literal.__getitem__(tuple(action for action in V2_BROWSER_CONTRACT if action!='navigate'))
+_V2_DISCOVERY_ACTION_NAME=Literal.__getitem__(tuple(action for action,spec in V2_BROWSER_CONTRACT.items() if spec.read_only))
+_V2_FIELD_NAME=Literal.__getitem__(tuple(dict.fromkeys(field for fields in STAGE_FIELDS.values() for field in fields)))
+_V2_SETUP_FIELD_NAME=Literal.__getitem__(STAGE_FIELDS['setup'])
+
+
+def _v2_action_json_schema(schema):
+    actions=schema['properties']['action'].get('enum',[])
+    branches=[]
+    for action in actions:
+        required,allowed=V2_ACTION_ARGUMENTS[action]
+        branch={'properties':{'action':{'const':action}}}
+        if required:branch['required']=list(required)
+        for key in required:
+            branch['properties'][key]={'type':'string','minLength':1,'maxLength':160}
+        # Nullable defaults are allowed by transport, but cannot carry an
+        # unrelated non-null argument. The Python validator applies the same rule.
+        for key in set(V2Action.model_fields)-{'action'}-set(allowed):
+            branch['properties'][key]={'type':'null'}
+        if action=='click':
+            branch['oneOf']=[
+                {'properties':{key:{'type':'null'} for key in ('screenshot_id','x','y')}},
+                {'required':['screenshot_id','x','y'],'properties':{
+                    'screenshot_id':{'type':'string','minLength':1},'x':{'type':'number'},'y':{'type':'number'}}},
+            ]
+        if action=='scroll':branch['properties']['delta_y']={'type':['number','null'],'minimum':-1000,'maximum':1000}
+        branches.append(branch)
+    schema['oneOf']=branches
 
 def validate_v2_capability(action,kind,part):
     if action in V2_CAPABILITIES and (kind,part) not in V2_CAPABILITIES[action]:
@@ -371,11 +424,20 @@ class V2Authorization(BaseModel):
     live:bool=False
     inference:bool=False
     edits:bool=False
+    manual_form_test:StrictBool=False
     persistence:bool=False
     vision:bool=False
     learning:bool=False
     fresh_iterations:bool=False
     candidate_evaluation:bool=False
+
+    @model_validator(mode='after')
+    def bounded_manual_form_test(self):
+        if self.manual_form_test and not all((self.live,self.inference,self.edits)):
+            raise ValueError('Manual form test requires live, inference and edit authorization')
+        if self.manual_form_test and self.persistence:
+            raise ValueError('Manual form test cannot authorize persistence')
+        return self
 
     def require_run(self,iterations):
         if not all((self.live,self.inference)):raise V2Stop('EXPLICIT_V2_AUTHORIZATION_REQUIRED',owner='authorization')
@@ -383,10 +445,10 @@ class V2Authorization(BaseModel):
         if iterations>1 and not all((self.learning,self.fresh_iterations)):raise V2Stop('FRESH_ITERATIONS_NOT_AUTHORIZED',owner='authorization')
 
 class V2Action(BaseModel):
-    model_config=ConfigDict(extra='forbid',strict=True)
-    action:Literal['observe','dom','screenshot','inspect','click','type','scroll','options','search','select','verify']
+    model_config=ConfigDict(extra='forbid',strict=True,json_schema_extra=_v2_action_json_schema)
+    action:_V2_ACTION_NAME
     reference:StrictStr|None=None
-    field:StrictStr|None=None
+    field:_V2_FIELD_NAME|None=None
     screenshot_id:StrictStr|None=None
     x:float|None=None
     y:float|None=None
@@ -394,11 +456,23 @@ class V2Action(BaseModel):
 
     @model_validator(mode='after')
     def combinations(self):
+        required,allowed=V2_ACTION_ARGUMENTS[self.action]
+        supplied={k for k in type(self).model_fields if k!='action' and getattr(self,k) is not None}
+        if not set(required)<=supplied or not supplied<=set(allowed):
+            raise ValueError('Unsupported action arguments')
+        if self.reference is not None and (not self.reference.strip() or len(self.reference)>160):
+            raise ValueError('Invalid observed reference')
+        if self.delta_y is not None:
+            import math
+            if not math.isfinite(self.delta_y) or abs(self.delta_y)>1000:raise ValueError('Scroll limit exceeded')
         if self.action in {'observe','dom','screenshot'} and any(v is not None for v in
             (self.reference,self.field,self.screenshot_id,self.x,self.y,self.delta_y)):
             raise ValueError('This action accepts no target arguments')
         coordinates=self.x is not None or self.y is not None or self.screenshot_id is not None
         if coordinates and (self.action!='click' or self.reference is None or self.x is None or self.y is None or not self.screenshot_id):raise ValueError('Visual click requires observed target, screenshot and coordinates')
+        if coordinates:
+            import math
+            if not all(math.isfinite(v) for v in (self.x,self.y)):raise ValueError('Coordinates must be finite')
         if self.action in {'inspect','click','type','scroll','options','search','select','verify'} and not self.reference:raise ValueError('Observed reference required')
         if self.action in {'type','search','select','verify'} and self.field is None:raise ValueError('Task field required')
         if self.delta_y is not None and self.action!='scroll':raise ValueError('Scroll argument on another action')
@@ -407,7 +481,110 @@ class V2Action(BaseModel):
 
 class V2DiscoveryAction(V2Action):
     """Same validated argument contract; only the action enum is restricted."""
-    action:Literal['observe','dom','screenshot','inspect','scroll','options','verify','navigate']
+    action:_V2_DISCOVERY_ACTION_NAME
+
+
+class V2ManualAction(V2Action):
+    """Manual operator scope advertises only the fixed Setup fields."""
+    field:_V2_SETUP_FIELD_NAME|None=None
+
+class V2ManualNoVisionAction(V2ManualAction):
+    action: Literal.__getitem__(tuple(action for action in V2_BROWSER_CONTRACT
+                                      if action not in {'navigate', 'screenshot'}))
+
+
+class V2CampaignStepAction(V2Action):
+    """Deterministic field tools for the separately authorized walkthrough."""
+    action: Literal.__getitem__(tuple(action for action in V2_BROWSER_CONTRACT
+                                      if action in {'observe', 'dom', 'wait', 'inspect', 'click',
+                                                    'options', 'search', 'select', 'verify'}))
+
+
+class V2CampaignAudienceAction(V2CampaignStepAction):
+    field: Literal.__getitem__(STAGE_FIELDS['audience']) | None = None
+
+
+class V2CampaignContentAction(V2CampaignStepAction):
+    field: Literal.__getitem__(STAGE_FIELDS['content']) | None = None
+
+
+class V2DiscoveryNoVisionAction(V2DiscoveryAction):
+    action: Literal.__getitem__(tuple(action for action, spec in V2_BROWSER_CONTRACT.items()
+                                      if spec.read_only and action != 'screenshot'))
+
+
+class V2SetupReadOnlyAction(V2DiscoveryNoVisionAction):
+    action: Literal.__getitem__(tuple(action for action, spec in V2_BROWSER_CONTRACT.items()
+                                      if spec.read_only and action not in {'navigate', 'screenshot'}))
+
+
+V2_DIAGNOSTIC_CAPABILITIES=MappingProxyType({
+    'observe':((),()),
+    'inspect':(('reference',),('reference',)),
+    'readback':(('reference',),('reference',)),
+    'scroll':(('reference',),('reference','delta_y')),
+    'navigate':(('reference',),('reference',)),
+})
+
+def _v2_diagnostic_json_schema(schema):
+    branches=[]
+    all_arguments={'reference','delta_y'}
+    for action,(required,allowed) in V2_DIAGNOSTIC_CAPABILITIES.items():
+        branch={'properties':{'action':{'const':action}}}
+        if required:branch['required']=list(required)
+        disallowed=all_arguments-set(allowed)
+        if disallowed:branch['not']={'anyOf':[{'required':[name]} for name in sorted(disallowed)]}
+        if 'reference' in required:
+            branch['properties']['reference']={'type':'string','minLength':1,'maxLength':160}
+        branches.append(branch)
+    schema['oneOf']=branches
+
+_V2_DIAGNOSTIC_ACTION_NAME=Literal.__getitem__(tuple(V2_DIAGNOSTIC_CAPABILITIES))
+
+class V2DiagnosticAction(BaseModel):
+    model_config=ConfigDict(extra='forbid',strict=True,json_schema_extra=_v2_diagnostic_json_schema)
+    action:_V2_DIAGNOSTIC_ACTION_NAME
+    reference:StrictStr|None=None
+    delta_y:float|None=None
+
+    @model_validator(mode='after')
+    def diagnostic_arguments(self):
+        required,allowed=V2_DIAGNOSTIC_CAPABILITIES[self.action]
+        supplied=set(self.model_fields_set)-{'action'}
+        if not set(required)<=supplied or not supplied<=set(allowed) or any(getattr(self,k) is None for k in required):
+            raise ValueError('Unsupported diagnostic action arguments')
+        if self.reference is not None and (not self.reference.strip() or len(self.reference)>160):
+            raise ValueError('Invalid observed reference')
+        if self.delta_y is not None:
+            import math
+            if not math.isfinite(self.delta_y) or abs(self.delta_y)>1000:
+                raise ValueError('Scroll limit exceeded')
+        return self
+
+def v2_action_arguments(schema):
+    from typing import get_args
+
+    contract = V2_DIAGNOSTIC_CAPABILITIES if schema is V2DiagnosticAction else V2_ACTION_ARGUMENTS
+    return {action: contract[action] for action in get_args(schema.model_fields['action'].annotation)}
+
+
+def v2_schema_rejection(schema, arguments):
+    actions = v2_action_arguments(schema)
+    raw_action = arguments.get('action')
+    if not isinstance(raw_action, str) or raw_action not in V2_ACTION_ARGUMENTS and raw_action != 'readback':
+        return {'action': 'UNRECOGNIZED', 'reason': 'UNKNOWN_ACTION'}
+    if raw_action not in actions:
+        return {'action': raw_action, 'reason': 'ACTION_UNAVAILABLE_IN_MODE'}
+    required, allowed = actions[raw_action]
+    supplied = {key for key, value in arguments.items() if value is not None} - {'action'}
+    unexpected = supplied - set(allowed)
+    missing = set(required) - supplied
+    return {'action': raw_action,
+            'reason': 'UNSUPPORTED_ACTION_ARGUMENTS' if unexpected or missing else 'INVALID_ARGUMENT_VALUE',
+            'unexpected': sorted(name for name in unexpected if name in schema.model_fields)
+                + (['UNSUPPORTED_KEY'] if unexpected - set(schema.model_fields) else []),
+            'missing': sorted(missing)}
+
 
 class V2Turn(BaseModel):
     model_config=ConfigDict(extra='forbid')

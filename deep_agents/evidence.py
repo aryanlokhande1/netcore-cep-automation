@@ -21,6 +21,7 @@ IMPORTANT={'GUARD_FAILURE','COMMAND_FAILED','CHILD_TARGET_DETACHED','REQUEST_DEC
     'TARGET_DETACHED','TARGET_DESTROYED','BROWSER_CREATED','NAVIGATION_COMPLETED','DOCUMENT_NAVIGATED',
     'FINAL_OBSERVATION_ATTEMPTED','STALE_COMMAND_PREVENTED'}
 IMPORTANT.update({'LOGIN_CONTEXT_READ','LOGIN_SCOPE_CERTIFIED','LOGIN_SCOPE_UNAVAILABLE'})
+IMPORTANT.add('DOCUMENT_REQUEST_TERMINAL')
 IMPORTANT.update({'LOGIN_SUBMITTED','TRANSITIONING','APPLICATION_LOADING',
     'APPLICATION_READY_AUTH_UNVERIFIED','AUTHENTICATION_EVIDENCE_PENDING',
     'AUTHENTICATED_AND_VERIFIED','AUTH_FAILED','HUMAN_ACTION_REQUIRED','SESSION_EXPIRED'})
@@ -35,6 +36,15 @@ CODES.update({'inaccessible_shadow_roots','inventory_changed','inventory_open_sh
 CODES.update({'relevant_evidence_stable','credential_form','challenge','rejected','expired','account_restricted',
     'status','reviewed','trusted','network_requests_replayed','unreviewed_draft_written','verification_basis'})
 CODES.update({'scan_limited','shell_status','security_scope','resource_contract_options'})
+CODES.update({'protocol_code','protocol_reason','protocol_error_sha256','network_request','frame',
+    'request_id_sha256','response_observed'})
+CODES.update({'scan_budget','next_scan_budget','render_comparison_status','render_comparison_screenshot',
+    'render_comparison_ax_ignored'})
+CODES.update({'nodes_inspected','pending_nodes','unknown_reason','host_ref','document_ref','frame_ref',
+    'frame_depth','host_element_type','scope_classification','verification_scope_intersection',
+    'security_coverage','observed_passes','persistent','closed_root_ownership_truncated',
+    'support','document_status','query_bearing','nested_identity_paths','json_traversal_limit_reached',
+    'root_type','objects','arrays','scalar_fields','sensitive_fields_skipped','array_limit_reached'})
 
 def code(value):
     if not isinstance(value,str) or len(value)>100 or not re.fullmatch(r'[A-Za-z0-9_.-]+',value):raise EvidenceError('NON_CANONICAL_EVIDENCE')
@@ -55,6 +65,19 @@ def facts_only(data):
     for key in ('resource_status_counts','resource_document_status_counts','json_support_counts'):
         if isinstance(data.get(key),dict):
             clean[key]={code(k):v for k,v in data[key].items() if type(v) is int}
+    if isinstance(data.get('closed_root_ownership'),list):
+        clean['closed_root_ownership']=[facts_only(item) for item in data['closed_root_ownership'][:32]]
+    if isinstance(data.get('semantic_ancestors'),list):
+        clean['semantic_ancestors']=[code(item) for item in data['semantic_ancestors'][:8]]
+    if isinstance(data.get('resource_diagnostics'),list):
+        clean['resource_diagnostics']=[facts_only(item) for item in data['resource_diagnostics'][:32]]
+    if isinstance(data.get('structure'),dict):clean['structure']=facts_only(data['structure'])
+    diagnostic=data.get('dom_diagnostics')
+    if isinstance(diagnostic,dict):
+        clean['dom_diagnostics']={k:v for k,v in diagnostic.items() if
+            k in {'inspected_elements','cross_shadow_control_owners'} and type(v) is int}
+        clean['dom_diagnostics']['rejections']={code(group):{code(k):v for k,v in values.items() if type(v) is int}
+            for group,values in diagnostic.get('rejections',{}).items() if isinstance(values,dict)}
     for key in ('issues','missing','gaps'):
         if isinstance(data.get(key),list):clean[key]=[code(v) for v in data[key][:16]]
     for key in ('dashboard_candidates','tenant_candidates','navigation_candidates','supported_json_resources',
@@ -159,7 +182,26 @@ def compile_evidence(result,events,adapter,history=None,max_tokens=6000):
         module_evidence=adapter.context(result),facts=facts,stages=list(stages.values()),evidence=[EvidenceCard(**g) for g in groups.values()],metrics=metrics,
         previous_strategy=strategy,comparison=comparison,source_event_count=len(events))
     body=package.model_dump()
-    if tokens(body)>max_tokens:raise EvidenceError('EVIDENCE_CONTEXT_BUDGET_EXCEEDED')
+    if tokens(body)>max_tokens:
+        # Keep every semantic finding, security negative, tool result and original
+        # index. Only replace redundant per-event hashes with one binding to the
+        # entire preserved pre-Teacher source sequence. This is a reference, not
+        # a substitute narrative or a claim that omitted source data was read.
+        references=[i for c in package.evidence if c.kind=='source_digest' for i in c.events]
+        if references:
+            cards=[c for c in package.evidence if c.kind!='source_digest']
+            priority={'failure':0,'error':0,'fact':1,'verify':2,
+                'authentication_review':3,'tool_result':4,'doer_action':5}
+            cards.sort(key=lambda c:priority.get(c.kind,6))
+            cards.append(EvidenceCard(kind='source_archive',events=sorted(set(references)),data={
+                'sha256':digest(events),'source_event_count':len(events),
+                'encoding':'CANONICAL_JSON_SHA256','reference_basis':'ORIGINAL_PRE_TEACHER_EVENT_INDICES'}))
+            package=package.model_copy(update={'evidence':cards})
+        measured=tokens(package.model_dump())
+        if measured>max_tokens:
+            error=EvidenceError('EVIDENCE_CONTEXT_BUDGET_EXCEEDED')
+            error.evidence_tokens=measured;error.evidence_token_limit=max_tokens
+            raise error
     # Independent ref integrity after deterministic aggregation, not offsets in a new list.
     if any(not 0<=i<len(events) for c in package.evidence for i in c.events):raise EvidenceError('INVALID_CANONICAL_REFERENCE')
     return package

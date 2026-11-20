@@ -17,7 +17,8 @@ class Element {
  get textContent(){return this.text+this.children.map(e=>e.textContent).join('');}
  getAttribute(k){return this.attrs[k]??null;}
  hasAttribute(k){return k in this.attrs;}
- getClientRects(){return this.hidden?[]:[{}];}
+ getClientRects(){return this.hidden?[]:[{x:0,y:0,width:100,height:20,right:100,bottom:20}];}
+ getBoundingClientRect(){return this.getClientRects()[0]||{x:0,y:0,width:0,height:0,right:0,bottom:0};}
  querySelectorAll(s){return Document.prototype.querySelectorAll.call({body:this},s);}
  querySelector(s){return this.querySelectorAll(s)[0]||null;}
  matches(selectors){return selectors.split(',').some(s=>{

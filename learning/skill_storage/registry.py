@@ -307,7 +307,9 @@ def save_whatsapp_candidate(lesson,*,run_id,parent,task_digest,evidence_refs,pay
         'task_sha256':task_digest,'source_iteration_id':run_id,'evidence_refs':lesson.evidence_refs,
         'change_summary':lesson.change_summary,'status':'UNAPPROVED_PENDING_EXECUTION','approved':False,
         'live_verified':False,'loaded_by':[],'procedures':[step.model_dump() for step in lesson.instructions]}
-    (directory/'SKILL.md').write_text(content,encoding='utf-8')
+    # Persist exactly the bytes hashed above. Windows text newline conversion
+    # otherwise produces a candidate that fails its own immutable reload check.
+    (directory/'SKILL.md').write_bytes(content.encode('utf-8'))
     (directory/'provenance.json').write_text(json.dumps(metadata,indent=2),encoding='utf-8')
     return {'version':version,'content_sha256':digest,'status':metadata['status']}
 

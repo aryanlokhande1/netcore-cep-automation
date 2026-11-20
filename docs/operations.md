@@ -58,6 +58,62 @@ budget. Reserve Teacher capacity; exhausted capacity does not authorize a retry.
 Three full executions may need separately reviewed budgets; count limits are not
 a promise that three task attempts will run.
 
+## One-run human-assisted diagnostic
+
+P0 repair update (19 November): use the bounded manual-form/Teacher command and
+validation limits in [WhatsApp execution repair](whatsapp-p0-execution-repair.md).
+From the repository root, launch the approved Setup test with `.\run-whatsapp.ps1`.
+It uses an existing reviewed Login evidence document from private configuration or
+`credentials/login-evidence-reviewed.json`. After independently verifying Login
+and the intended tenant, the launcher asks once whether to write the approved
+Setup fields. The terminal reports the missing proof before Chromium starts if
+the evidence document cannot be loaded.
+To obtain reviewed evidence, use the existing standalone Login review from the
+same interactive terminal. Choose a private path and follow its D/P/A
+discovery, preview, and digest approval steps:
+
+    python -m app.cli live --login-only --authorized-live --api-request-budget 6 --hold-seconds 300 --review-evidence --evidence-review-file <PRIVATE_FILE>
+
+The independently verified Login result and the protected Setup tenant route
+are required for manual entry. Read-only diagnostics remain available through
+a separate invocation. `--authorized-learning` reserves one Teacher review and
+permits an unapproved candidate after an eligible browser-strategy failure.
+Success and technical stops can be reviewed without creating a candidate.
+Every evaluation requires a separate operator launch. Select the baseline with
+`--baseline-sha256`, or provide both `--candidate` and `--candidate-sha256`.
+Each run records the selected bytes and digest and writes any candidate diff
+into its local run directory. The full V2 command now accepts
+one iteration per operator launch. The older multi-iteration example above is
+historical and is not an instruction to retry automatically.
+
+The payload-free Login/WhatsApp diagnostic is separate from the V2 campaign workflow.
+Run it only from an interactive VS Code terminal with the approved live, inference and
+candidate-evaluation permissions:
+
+    python -m app.cli whatsapp-human-assisted --authorized-live --authorized-inference --authorized-candidate-evaluation --operator-review-seconds 300 --session-seconds 900
+
+It forces headed Chromium, uses the existing Login credential broker and verifier,
+and does not accept or modify a campaign payload. A consented unverified-session
+route is diagnostic-only; it does not mark authentication verified or enter the
+production authenticated route. By default, the task Doer is restricted to
+read-only observation, readback, bounded scrolling and fresh observed-link
+navigation. Screenshots are not captured by default.
+
+For the separately authorized manual form test, add `--manual-form-test`. This
+loads the pinned private payload and permits field entry only into freshly
+observed Setup controls, with independent readback. It does not authorize
+Next Step, Save, Schedule, Publish, Activate or Send, and it does not certify
+authentication. The current implementation does not prove that the application
+will not automatically persist a field change; do not treat readback as proof
+that no server-side campaign state was created.
+
+The per-run record is under
+`outputs/human-assisted/login-whatsapp-<run-id>/`. Review `report.md` and the evidence
+manifest; missing observations, stage reachability, source-diff baseline and provider
+usage must remain `NOT_CAPTURED`/unavailable rather than inferred. The supplied
+18 November 2026, 18:00 Asia/Kolkata schedule is not read by the payload-free
+diagnostic and is not entered by the manual Setup test.
+
 ## Stops and recovery
 
 Missing time/authorization blocks before browser startup. Authentication evidence is

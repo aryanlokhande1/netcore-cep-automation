@@ -14,7 +14,11 @@ async def deterministic_readback(tools,fields=None):
         'expected':{k:getattr(tools.payload,k) for k in available}}
     if 'schedule_datetime' in available and tools.ui.fields['schedule_datetime'].kind=='text':
         settings['expected']['schedule_datetime']=tools.payload.scheduled_local().strftime(tools.ui.fields['schedule_datetime'].datetime_format)
-    script=r'''(s=>{
+    from modules.whatsapp.observation import TAG_CHIP_HELPERS, CAMPAIGN_PICKER_HELPERS
+    settings['tag_chip_mode'] = getattr(tools, 'page1_tag_chip_mode', False)
+    settings['campaign_walkthrough'] = getattr(tools, 'campaign_verified_stage', None) == tools.stage
+    settings['campaign_stage'] = tools.stage
+    script=r'''(s=>{''' + TAG_CHIP_HELPERS + CAMPAIGN_PICKER_HELPERS + r'''
       const one=q=>{if(!q)return null;const a=document.querySelectorAll(q);return a.length===1?a[0]:null};
       const visible=e=>!!e&&e.getClientRects().length>0&&getComputedStyle(e).visibility!=='hidden';
       const norm=x=>String(x??'').replace(/\s+/g,' ').trim();
@@ -22,18 +26,44 @@ async def deterministic_readback(tools,fields=None):
       for(const [key,b] of Object.entries(s.fields)){
         const e=one(b.selector),wanted=s.expected[key];let ok=false;
         if(e&&stage&&stage.contains(e)&&visible(e)){
-          if(b.kind==='checkbox')ok=e.type==='checkbox'&&e.checked===wanted;
-          else if(b.kind==='radio')ok=e.type==='radio'&&e.checked===true&&
-            (norm(e.value)===wanted||norm(e.labels?.[0]?.textContent)===wanted);
+          if(b.kind==='checkbox'){
+            const role=e.getAttribute('role');
+            const checked=e.type==='checkbox'?e.checked:(role==='checkbox'||
+              (key==='ga_tracking'&&role==='switch'&&e.type!=='submit'))?
+              (e.getAttribute('aria-checked')==='true'?true:e.getAttribute('aria-checked')==='false'?false:null):null;
+            ok=typeof checked==='boolean'&&checked===wanted;
+          }
+          else if(b.kind==='radio'){
+            const checked=e.type==='radio'?e.checked:e.getAttribute('role')==='radio'?e.getAttribute('aria-checked')==='true':false;
+            const label=e.getAttribute('aria-label')||e.labels?.[0]?.textContent||
+              (e.getAttribute('aria-labelledby')||'').split(/\s+/).map(id=>document.getElementById(id)?.textContent||'').join(' ')||e.textContent||'';
+            ok=checked===true&&(norm(e.value)===wanted||norm(label)===wanted);
+          }
           else if(b.kind==='text')ok=['INPUT','TEXTAREA'].includes(e.tagName)&&e.value===wanted;
           else if(b.kind==='native_select'){
             const selected=e.tagName==='SELECT'?[...e.selectedOptions]:[];
             ok=selected.length===1&&(selected[0].value===wanted||norm(selected[0].textContent)===wanted);
+          }else if(key==='tag' && s.tag_chip_mode && b.kind==='combobox'){
+            const ids=((e.getAttribute('aria-controls')||'')+' '+(e.getAttribute('aria-owns')||''))
+                .split(/\s+/).filter(Boolean);
+            const inPicker=node=>ids.some(id=>document.getElementById(id)?.contains(node));
+            let chips=[];
+            for(let row=e.parentElement,depth=0;row&&stage.contains(row)&&depth<4;row=row.parentElement,depth++){
+              const inputs=[...row.querySelectorAll('input,select,textarea,[role=combobox]')].filter(visible);
+              if(inputs.length!==1||inputs[0]!==e)break;
+              chips=[...row.querySelectorAll('mat-chip,mat-chip-row,mat-chip-option,[aria-selected=true]')]
+                .filter(node=>chipVisible(node)&&!inPicker(node)&&!node.matches('input,textarea,[role=searchbox]'));
+              if(chips.length)break;
+            }
+            ok=chips.length===1&&(chipText(chips[0].innerText??chips[0].textContent)===wanted||
+                ['?','?','?'].some(marker=>chipParts(chips[0],marker).label===wanted));
+          }else if(s.campaign_walkthrough&&campaignPickerField(key)&&b.kind==='combobox'){
+            ok=campaignPickerOwners(s.campaign_stage)[key]===e&&campaignSelected(e,wanted);
           }else if(b.kind==='combobox'||b.kind==='selected_text'){
             const selected=one(b.selected_selector);
             // A reviewed selected-state selector must identify a value display or
             // selected option, never the editable search input.
-            ok=visible(selected)&&!selected.matches('input,textarea,[role=searchbox]')&&
+            ok=visible(selected)&&!selected.isContentEditable&&!selected.matches('input,textarea,[role=searchbox]')&&
               (stage.contains(selected)||selected.getAttribute('aria-selected')==='true')&&norm(selected.textContent)===wanted;
           }
         }
@@ -50,7 +80,14 @@ async def deterministic_readback(tools,fields=None):
         state['fields']['schedule_datetime']=await tools.browser.page.evaluate('(s=>{const one=q=>{if(!q)return null;const a=document.querySelectorAll(q);return a.length===1?a[0]:null};const d=one(s.date),t=one(s.time),p=one(s.stage);return !!d&&!!t&&!!p&&p.contains(d)&&p.contains(t)&&d.tagName==="INPUT"&&t.tagName==="INPUT"&&d.getClientRects().length>0&&t.getClientRects().length>0&&getComputedStyle(d).visibility!=="hidden"&&getComputedStyle(t).visibility!=="hidden"&&d.value===s.expected_date&&t.value===s.expected_time})('+json.dumps(parts)+')')
     state['checks']={'current_field_evidence_complete':len(available)==len(fields)}
     if tools.stage=='content':
-        state['checks']['template_preview_visible']=bool(tools.ui.content_preview_selector) and await tools.browser.page.evaluate('(q=>{const a=document.querySelectorAll(q);return a.length===1&&a[0].getClientRects().length>0})('+json.dumps(tools.ui.content_preview_selector)+')')
+        state['checks']['template_preview_visible']=bool(tools.ui.content_preview_selector) and await tools.browser.page.evaluate(
+            r'''(q=>{const a=document.querySelectorAll(q), e=a.length===1?a[0]:null;
+              if(!e||!e.getClientRects().length||getComputedStyle(e).visibility!=='visible')return false;
+              if(e.matches('[aria-busy=true]')||e.querySelector('[aria-busy=true],mat-spinner,[role=progressbar]'))return false;
+              const text=(e.innerText||'').replace(/^\s*template preview\s*/i,'').trim();
+              return !!text&&!/^(loading|no template selected|select (a )?template)[ .?]*$/i.test(text)||
+                [...e.querySelectorAll('img')].some(img=>img.complete&&img.naturalWidth>0&&img.getClientRects().length);
+            })('''+json.dumps(tools.ui.content_preview_selector)+')')
     if await tools.protect()!=document:raise V2Stop('READBACK_DOCUMENT_CHANGED',owner='browser',unsafe=True)
     if tools.stage=='setup' and 'waba' in state['fields']:
         state['fields']['waba']=state['fields']['waba'] and tools.waba_selected
@@ -78,6 +115,12 @@ async def deterministic_readback(tools,fields=None):
             state['checks']['current_preview_identity']=bool(current)
     state['evidence_ref']=tools.browser.trace.agent_event('deterministic_readback',
         role='observer' if tools.browser.trace.agent_phase=='observer' else 'doer',result=state)
+    if tools.stage == 'setup':
+        if fields == STAGE_FIELDS['setup']:
+            tools.last_independent_readback = state
+        else:
+            prior = getattr(tools, 'last_independent_readback', {})
+            tools.last_independent_readback = {**state, 'fields': {**prior.get('fields', {}), **state['fields']}}
     return state
 
 

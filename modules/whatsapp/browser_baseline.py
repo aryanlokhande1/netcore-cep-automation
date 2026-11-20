@@ -35,12 +35,18 @@ def sanitized_action_error(error,operation):
         'raw_exception_omitted':True}
 
 
-async def reject_security_negatives(browser):
+async def reject_security_negatives(browser, *, audit=False):
     """Existing accessible negative predicates, flags only; never inventory."""
     safety=await browser.page.evaluate(NEGATIVE_SNAPSHOT.replace('SETTINGS',json.dumps({'origins':sorted(browser.policy.origins)})))
     flags=safety.get('flags',{}) if isinstance(safety,dict) else {}
     negatives=('credential_form','challenge','rejected','expired','account_restricted')
     detected=[k for k in negatives if flags.get(k) is True]
+    if audit:
+        browser.trace.lifecycle('LOGIN_CAPTURE_SECURITY', {
+            'state': 'SECURITY_NEGATIVE_OBSERVED' if detected else 'SECURITY_SCAN_RETURNED',
+            'failed_predicates': detected,
+            'coverage': safety.get('coverage', {}) if isinstance(safety, dict) else {},
+        })
     if detected:raise BaselineStop('AUTHENTICATION_OR_SECURITY_STOP',failed_predicates=detected)
     if not all(type(flags.get(k)) is bool for k in negatives):raise BaselineStop('SECURITY_OBSERVATION_INVALID')
 

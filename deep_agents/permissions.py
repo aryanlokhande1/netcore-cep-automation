@@ -48,11 +48,31 @@ class InferenceBudget:
     teacher_reserve_input:int=0
     teacher_reserve_output:int=0
 
+    def token_operands(self, input_bound, output_cap, *, role):
+        pool = self.token_pool
+        hold = bool(pool and role != 'teacher' and not self.role_requests.get('teacher'))
+        reserved_input = pool.input_reserved if pool else self.reserved_input
+        reserved_output = pool.output_reserved if pool else self.reserved_output
+        input_limit = pool.input_limit if pool else self.max_input_tokens
+        output_limit = pool.output_limit if pool else self.max_output_tokens
+        teacher_input = self.teacher_reserve_input if hold else 0
+        teacher_output = self.teacher_reserve_output if hold else 0
+        return {'prior_input_reserved': reserved_input, 'prior_output_reserved': reserved_output,
+                'input_bound_with_margin': input_bound, 'max_output_tokens': output_cap,
+                'teacher_input_reserve': teacher_input, 'teacher_output_reserve': teacher_output,
+                'input_limit': input_limit, 'output_limit': output_limit,
+                'budget_input_reserved': self.reserved_input, 'budget_output_reserved': self.reserved_output,
+                'budget_input_limit': self.max_input_tokens, 'budget_output_limit': self.max_output_tokens,
+                'budget_input_over_limit': self.reserved_input + input_bound > self.max_input_tokens,
+                'budget_output_over_limit': self.reserved_output + output_cap > self.max_output_tokens,
+                'input_over_limit': reserved_input + input_bound + teacher_input > input_limit,
+                'output_over_limit': reserved_output + output_cap + teacher_output > output_limit}
+
     def reserve_tokens(self,input_bound,output_cap,*,role='doer'):
-        if role!='teacher' and self.teacher_reserve_input and not self.role_requests.get('teacher'):
-            if self.token_pool and (self.token_pool.input_reserved+input_bound+self.teacher_reserve_input>self.token_pool.input_limit or
-                self.token_pool.output_reserved+output_cap+self.teacher_reserve_output>self.token_pool.output_limit):
-                raise RuntimeError('FINAL_TEACHER_TOKEN_RESERVE')
+        operands = self.token_operands(input_bound, output_cap, role=role)
+        if (operands['teacher_input_reserve'] or operands['teacher_output_reserve']) and (
+                operands['input_over_limit'] or operands['output_over_limit']):
+            raise RuntimeError('FINAL_TEACHER_TOKEN_RESERVE')
         if self.reserved_input+input_bound>self.max_input_tokens or self.reserved_output+output_cap>self.max_output_tokens:
             raise RuntimeError('TOTAL_TOKEN_BUDGET_EXHAUSTED')
         if self.token_pool:self.token_pool.reserve(input_bound,output_cap)
@@ -105,7 +125,14 @@ def model_failure_details(error,diagnostic=None):
         'browser_creation_observed','login_tool_calls','task_tool_calls',
         'credential_submissions_observed','observation_records','goal','when','action','field'}
     internal={'OUTPUT_LIMIT_INCOMPLETE','PROVIDER_RESPONSE_INCOMPLETE','MISSING_STRUCTURED_REPORT',
-        'APPROVED_SKILL_NOT_LOADED','MODEL_BUDGET_EXHAUSTED','TOTAL_TOKEN_BUDGET_EXHAUSTED'}
+        'APPROVED_SKILL_NOT_LOADED','MODEL_BUDGET_EXHAUSTED','TOTAL_TOKEN_BUDGET_EXHAUSTED',
+        'FINAL_TEACHER_TOKEN_RESERVE','DOER_TOOL_CALL_BUDGET_EXHAUSTED',
+        'EVIDENCE_CONTEXT_BUDGET_EXCEEDED','COMPARISON_CONTEXT_BUDGET_EXCEEDED',
+        'INVALID_FACT_REFERENCE','INVALID_CANONICAL_REFERENCE','NON_CANONICAL_EVIDENCE',
+        'RETRIEVAL_REFERENCE_BUDGET','UNKNOWN_CANONICAL_REFERENCE','RETRIEVAL_TOKEN_BUDGET',
+        'MODEL_BOUNDARY_CONTEXT_BUDGET_OR_HISTORY','MISSING_OUTPUT_LIMIT',
+        'TEACHER_INPUT_BOUND_EXCEEDS_CAP','TEACHER_OTHER_HISTORY_PRESENT',
+        'TEACHER_REQUIRES_ONE_USER_MESSAGE','TEACHER_CONVERSATION_CONTINUATION'}
     details={'exception_class':type(error).__name__,'code':'MODEL_OR_CONTROLLER_EXCEPTION','validation_errors':[],'cause_classes':[]}
     if len(getattr(error,'args',()))==1 and isinstance(error.args[0],str) and error.args[0] in internal:details['code']=error.args[0]
     current=error;seen=set()
@@ -113,6 +140,14 @@ def model_failure_details(error,diagnostic=None):
         if current is None or id(current) in seen:break
         seen.add(id(current))
         details['cause_classes'].append(type(current).__name__)
+        args=getattr(current,'args',())
+        if details['code']=='MODEL_OR_CONTROLLER_EXCEPTION' and len(args)==1 and isinstance(args[0],str) and args[0] in internal:
+            details['code']=args[0]
+        # Only the known compiler failure may supply these bounded numeric facts.
+        if len(args)==1 and args[0]=='EVIDENCE_CONTEXT_BUDGET_EXCEEDED':
+            for key in ('evidence_tokens','evidence_token_limit'):
+                value=getattr(current,key,None)
+                if type(value) is int and 0<=value<=1000000000:details[key]=value
         if callable(getattr(current,'errors',None)):
             try:
                 for item in current.errors(include_input=False,include_context=False,include_url=False)[:16]:
@@ -128,7 +163,7 @@ def model_failure_details(error,diagnostic=None):
     return details
 
 class PermissionMiddleware(AgentMiddleware):
-    def __init__(self, allowed, trace, budget, offline,role='doer',navigation_state=None,max_tool_calls=20):
+    def __init__(self, allowed, trace, budget, offline,role='doer',navigation_state=None,max_tool_calls=20,*,tool_budget_error=None):
         self.allowed=frozenset(allowed)
         self.role=role
         self.trace,self.budget,self.offline=trace,budget,offline
@@ -136,6 +171,9 @@ class PermissionMiddleware(AgentMiddleware):
         self.tool_calls=0
         self.navigation_state=navigation_state
         self.max_tool_calls=max_tool_calls
+        if tool_budget_error not in {None,'DOER_TOOL_CALL_BUDGET_EXHAUSTED'}:
+            raise ValueError('Unsupported tool budget error code')
+        self.tool_budget_error=tool_budget_error
 
     async def awrap_model_call(self,request,handler):
         # Framework profiles remove built-ins; this additional allowlist fails closed
@@ -188,6 +226,13 @@ class PermissionMiddleware(AgentMiddleware):
         invocation=self.trace.agent_event('tool_invocation',role=self.role,tool=request.tool_call['name'],
             arguments=self.trace.safe_tool_arguments(request.tool_call['name'],request.tool_call.get('args')),
             status='REQUESTED') if capture else None
+        if request.tool_call['name'] in self.allowed and self.tool_calls>self.max_tool_calls and self.tool_budget_error:
+            self.trace.tool(request.tool_call['name'],self.role,'denied')
+            if capture:self.trace.agent_event('tool_result',role=self.role,invocation_id=invocation,
+                tool=request.tool_call['name'],status='DENIED',error=self.tool_budget_error,
+                tool_calls_used=self.tool_calls,tool_calls_limit=self.max_tool_calls,
+                duration_ms=round((monotonic()-started)*1000,3))
+            raise RuntimeError(self.tool_budget_error)
         if request.tool_call['name'] not in self.allowed or self.tool_calls > self.max_tool_calls:
             self.trace.tool(request.tool_call['name'],self.role,'denied')
             self.trace.add('error',error='POLICY')

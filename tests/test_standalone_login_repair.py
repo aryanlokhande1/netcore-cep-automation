@@ -105,3 +105,47 @@ async def test_disabled_review_rejects_accidental_learning_or_teacher_reservatio
     monkeypatch.setattr(app.safety,'authorize_live',lambda *a:None)
     with pytest.raises(ConfigurationError,match='Disabled Teacher review'):
         await controller.run_live(Config('unused'),authorized=True,api_request_budget=6,review=False,learning=learning,teacher_request_budget=teacher)
+
+
+@pytest.mark.parametrize('login_only,evidence_review,expected_cap', [
+    (True, True, 120), (True, False, 30), (False, True, 30),
+])
+async def test_cli_scopes_startup_action_allowance_to_login_only_evidence_review(
+        monkeypatch, login_only, evidence_review, expected_cap):
+    from app import cli
+    from app.config import Config
+
+    runner = AsyncMock(return_value={})
+    monkeypatch.setattr(cli, 'run_live', runner)
+    monkeypatch.setattr(cli.Config, 'load', lambda: Config('unused'))
+    argv = ['live', '--authorized-live', '--api-request-budget', '6', '--hold-seconds', '300']
+    if login_only:
+        argv.append('--login-only')
+    if evidence_review:
+        argv += ['--review-evidence', '--evidence-review-file', 'private-destination.json']
+    await cli.run(cli.build_parser().parse_args(argv))
+
+    config = runner.call_args.args[0]
+    assert config.max_actions == expected_cap
+    assert config.max_login_submissions == 1
+    assert runner.call_args.args[5] == 300
+    assert runner.call_args.kwargs['evidence_review'] is evidence_review
+
+
+@pytest.mark.parametrize('stage', ['FINAL_READ_ONLY_OBSERVATION', 'DISCOVERY'])
+def test_review_persists_typed_action_budget_stop(stage, monkeypatch):
+    from app.trace import Trace
+    from browser.evidence_diagnostics import evidence_diagnostic, review_event
+    from browser.stagehand_client import BrowserBudgetExceeded
+
+    trace = Trace()
+    monkeypatch.setattr(trace, 'write', lambda _root: None)
+    browser = SimpleNamespace(trace=trace, guard=None)
+    error = BrowserBudgetExceeded('ACTION_LIMIT', actions_used=120, actions_limit=120)
+    diagnostic = evidence_diagnostic(error, stage, browser)
+    saved = review_event(browser, stage, diagnostic)
+
+    assert saved['code'] == 'BROWSER_ACTION_BUDGET_EXHAUSTED'
+    assert (saved['budget_kind'], saved['actions_used'], saved['actions_limit']) == ('ACTION_LIMIT', 120, 120)
+    assert trace.events[-1]['diagnostic'] == saved
+    assert evidence_diagnostic(TimeoutError(), stage)['code'] == 'BROWSER_OBSERVATION_UNAVAILABLE'

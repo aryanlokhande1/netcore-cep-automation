@@ -26,8 +26,8 @@ async def test_interception_is_armed_before_resume_and_renderer_query(kind):
     guard.send=send
     await guard._event(attachment(kind))
     assert not guard.failed
-    assert commands[:3]==['Fetch.enable','Target.setAutoAttach','Runtime.runIfWaitingForDebugger']
-    if kind=='page':assert commands[3:]==['Page.enable','Page.getFrameTree']
+    assert commands[:4]==['Fetch.enable','Network.enable','Target.setAutoAttach','Runtime.runIfWaitingForDebugger']
+    assert commands[4:]==['Page.enable','Page.getFrameTree']
     assert 'PRIVATE' not in json.dumps(guard.lifecycle)
 
 async def test_detached_session_fails_immediately_with_exact_pending_command():

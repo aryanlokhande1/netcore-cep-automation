@@ -8,7 +8,7 @@ from pathlib import Path
 from app.safety import require_live_browser
 from modules.login.evidence import EvidenceConfig
 from modules.login.verifier import verify
-from browser.evidence_diagnostics import EvidenceFailure,ApprovalFailure,evidence_diagnostic,review_event,gate_summary
+from browser.evidence_diagnostics import EvidenceFailure,ApprovalFailure,evidence_diagnostic,review_event,gate_summary,operator_event
 
 class EvidenceReview:
     def __init__(self,browser):
@@ -62,6 +62,18 @@ class EvidenceReview:
         matching=[r for r in getattr(discovery,'resources',[]) if r['path']==candidate.readonly_path]
         resource=max(matching,key=lambda r:r['alias'])['alias'] if matching else None
         return current,resource
+    async def operator_candidates(self,kind):
+        require_live_browser(self.browser)
+        discovery=getattr(self.browser,'discovery',None)
+        if discovery is None:raise ApprovalFailure('PASSIVE_DISCOVERY_REQUIRED')
+        return await discovery.operator_candidates(kind)
+    async def bind_candidate(self,reference):
+        require_live_browser(self.browser)
+        discovery=getattr(self.browser,'discovery',None)
+        if discovery is None:raise ApprovalFailure('PASSIVE_DISCOVERY_REQUIRED')
+        result=await discovery.bind_candidate(reference)
+        operator_event(self.browser,'CANDIDATE_BINDING',result)
+        return result
     async def preview(self):
         require_live_browser(self.browser)
         try:raw=self.path.read_bytes()
@@ -153,6 +165,38 @@ def negative_summary(observation,details=None):
     return {key:'FAIL' if getattr(observation,key) else 'NOT_CHECKED' if unavailable else 'PASS' for key in
         ('credential_form','challenge','rejected','expired','account_restricted','login_entry')}
 
+def discovery_terminal_summary(discovery, readiness):
+    dom = discovery.get('dom_diagnostics') or {}
+    scope = discovery.get('scope_certificate') or {}
+    context = discovery.get('page_context') or {}
+    summary = {key: discovery[key] for key in (
+        'status', 'code', 'stage', 'transport_status', 'dashboard_candidates', 'tenant_candidates',
+        'observed_json_resources', 'supported_json_resources', 'resource_contract_options',
+        'unreviewed_draft_written', 'gaps', 'browser_actions_remaining', 'documents_inspected',
+        'permitted_frames_unavailable', 'external_frames_skipped', 'json_support_counts',
+        'resource_document_status_counts', 'budget_kind', 'actions_used', 'actions_limit',
+        'render_comparison_status', 'render_comparison_screenshot', 'render_comparison_ax_ignored') if key in discovery}
+    resource_keys = ('resource', 'state', 'support', 'document_status', 'query_bearing',
+                     'authenticated_indicator_count', 'exact_tenant_indicator_count', 'json_traversal_limit_reached')
+    resources = discovery.get('resource_diagnostics') or []
+    summary.update(
+        approval='REQUIRES_SUCCESSFUL_PREVIEW',
+        readiness={key: readiness[key] for key in ('state', 'elapsed_ms', 'polls', 'shell_landmarks') if key in readiness},
+        document={key: context[key] for key in ('primary_document_coherent', 'sdk_page_active', 'expected_host',
+                                                'primary_target_alias', 'primary_session_alias', 'document_generation')
+                  if key in context},
+        elements_inspected=dom.get('inspected_elements'),
+        dom_rejections=dom.get('rejections', {}),
+        dashboard_visibility_rejections=dom.get('dashboard_visibility_rejections', {}),
+        exact_tenant_rejections=dom.get('exact_tenant_rejections', {}),
+        protected_scope={key: scope[key] for key in ('state', 'certified', 'document_current',
+            'inventory_documents_inspected', 'inaccessible_shadow_roots', 'inventory_changed',
+            'inventory_complete', 'negative_scope_complete') if key in scope},
+        resources=[{key: item[key] for key in resource_keys if key in item} for item in resources[:12]],
+        omitted_resources=max(0, len(resources) - 12))
+    return summary
+
+
 async def evidence_review_hold(browser,seconds):
     if not sys.stdin.isatty() or not 1<=seconds<=300:raise ValueError('Interactive bounded evidence review required')
     review=EvidenceReview(browser)
@@ -161,11 +205,20 @@ async def evidence_review_hold(browser,seconds):
     async def operation(stage,callback):
         try:data=await asyncio.wait_for(callback(),max(.01,deadline-monotonic()))
         except Exception as error:data=evidence_diagnostic(error,stage,browser)
-        print(json.dumps(review_event(browser,stage,data)),flush=True)
+        recorded=review_event(browser,stage,data)
+        if stage == 'DISCOVERY':
+            shown = discovery_terminal_summary(recorded, getattr(browser, 'login_readiness', None) or {})
+            print('REVIEW DISCOVERY ' + json.dumps(shown), flush=True)
+        elif getattr(browser,'rendering_diagnostics_enabled',False):
+            shown={k:v for k,v in recorded.items() if k in {'status','code','verification','gate_status','gates',
+                'digest','options','meaning','gaps','issues','resource_contract_options','render_comparison_status','render_comparison_screenshot'}}
+            print('REVIEW '+stage+' '+json.dumps(shown),flush=True)
+        else:print(json.dumps(recorded),flush=True)
         return data
     if getattr(browser,'discovery',None):
         await operation('DISCOVERY',browser.discovery.prepare)
     pending_selection=None
+    approval_digest=None
     while monotonic()<deadline:
         key=None
         if sys.platform=='win32':
@@ -177,6 +230,7 @@ async def evidence_review_hold(browser,seconds):
         if key in ('\r','\n'):return None
         if pending_selection and key in tuple('123456789'):
             option=int(key);selected_digest=pending_selection['digest'];pending_selection=None
+            approval_digest=None
             await operation('SELECTION',lambda:review.select_resource_contract(option,selected_digest,confirmed=True))
         if key=='r':
             options=await operation('RESOURCE_OPTIONS',review.resource_options)
@@ -184,14 +238,21 @@ async def evidence_review_hold(browser,seconds):
             print('Choose 1-9 only if you understand the observed protected-resource contract. Selection is not approval; press P then A to verify and approve.',flush=True)
         if key=='d' and getattr(browser,'discovery',None):
             pending_selection=None
+            approval_digest=None
             await operation('DISCOVERY',browser.discovery.prepare)
         if key=='p':
-            await operation('PREVIEW',review.preview)
+            preview=await operation('PREVIEW',review.preview)
+            approval_digest=preview.get('digest') if preview['status']=='READY_FOR_EXPLICIT_APPROVAL' else None
         if key=='a':
+            if approval_digest is None:
+                diagnostic=evidence_diagnostic(ApprovalFailure('PREVIEW_REQUIRED_BEFORE_APPROVAL'),'APPROVAL',browser)
+                print(json.dumps(review_event(browser,'APPROVAL',diagnostic)),flush=True)
+                continue
             try:
-                observed=await asyncio.wait_for(review.approve(review.preview_digest,approved=True),max(.01,deadline-monotonic()))
+                observed=await asyncio.wait_for(review.approve(approval_digest,approved=True),max(.01,deadline-monotonic()))
                 print(json.dumps(review_event(browser,'APPROVAL',{'status':'APPROVED','gates':gate_summary(observed),
                     'negative_states':negative_summary(observed),'trusted':True})),flush=True)
+                print('Reviewed Login evidence saved to ' + str(review.path.resolve()), flush=True)
                 return observed
             except Exception as error:print(json.dumps(review_event(browser,'APPROVAL',evidence_diagnostic(error,'APPROVAL',browser))),flush=True)
         await asyncio.sleep(.05)

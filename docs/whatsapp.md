@@ -24,11 +24,61 @@ The only supported task path is `app.cli whatsapp` ->
 Teacher, candidate creation, cleanup and fresh-session boundaries. There is no
 second active WhatsApp learning scheduler.
 
+## Human-assisted diagnostic and manual Setup test
+
+`app.cli whatsapp-human-assisted` is a separate, one-run diagnostic path. It requires
+`--authorized-live`, `--authorized-inference` and
+`--authorized-candidate-evaluation`, runs headed Chromium, and submits Login
+credentials through the existing broker at most once. It leaves the five
+independent authentication predicates unchanged. Human confirmation and
+diagnostic consent never certify authentication.
+
+The operator reviews current candidates in the interactive VS Code terminal.
+Type the numbered selection directly into that terminal and press Enter; Copilot
+chat is not an input channel for these prompts. Each prompt starts with a
+300-second inactivity window, bounded by the overall operator-review deadline
+(default 300 seconds, maximum 600 seconds) and the 900-second session timeout.
+The terminal shows a live countdown and logs prompt-open, received-input,
+validation and timeout events. Review timeout defaults to abort and
+diagnostic-consent timeout defaults to No.
+By default, an unverified session gets a separate read-only WhatsApp Doer consent
+prompt whose default is No. This diagnostic permits current observation,
+readback, bounded scrolling and fresh observed-link navigation only; it cannot
+edit, advance, save, schedule, publish, activate or send. Candidate guidance
+remains explicitly unapproved and is not promoted.
+The run has a separate 300-browser-action cap in addition to its session
+deadline. Action-budget exhaustion, browser-command timeout and overall session
+timeout are recorded as distinct failures.
+
+`--manual-form-test` is a separate explicit authorization for the one-run
+non-persistent Setup test. It loads the pinned private campaign payload and lets
+the Doer enter only those fixed values into freshly observed, owned Setup fields,
+then verifies each field by independent readback. It does not certify
+authentication, permit navigation or allow Next Step, Save, Schedule, Publish,
+Activate or Send. The test stops if a field, scope or target cannot be verified.
+Recognition currently binds only protected top-level light-DOM controls.
+Nested-frame and open-shadow counts are diagnostic; controls inside those roots
+are not enabled for action or readback. If Setup is rendered only there, the
+Doer remains blocked rather than receiving a guessed target.
+The application does not currently prove that an observed field has no automatic
+server-side persistence behavior; do not treat a successful field readback as
+proof that the application created no server-side state.
+
+Artifacts are written to
+`outputs/human-assisted/login-whatsapp-<run-id>/`. Screenshots default to
+`NOT_CAPTURED`; unavailable evidence and provider usage remain explicitly
+unavailable. The pinned payload schedule is 18 November 2026 at 18:00
+Asia/Kolkata. The payload-free read-only diagnostic does not read it; the manual
+Setup test may load the payload but does not enter or apply Schedule fields.
+An operator-review timeout or abort is reported as `BLOCKED_OPERATOR_REVIEW`;
+WhatsApp stages without an observed page remain `NOT_REACHED`.
+
 ## Payload and authorization
 
 The initial payload is private: `credentials/whatsapp-v2-payload.json`, excluded by
 the existing credentials ignore rule. It is separate from SKILL.md. The supplied
-schedule is 17 November 2026, 16:00 Asia/Kolkata. Missing/invalid/expired time blocks before Login.
+schedule is 18 November 2026, 18:00 Asia/Kolkata. Missing/invalid/expired time
+blocks before Login.
 Startup requires explicit live/inference permission and exact SHA-256 approval of
 the payload and any supplied incremental UI evidence. Creation/value writes additionally
 require edit/persistence permission; without them the branch is read-only. Vision,

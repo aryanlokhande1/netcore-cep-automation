@@ -23,7 +23,66 @@ class ProtectedTab:
     blank_loader_id:str|None
 
 
+@dataclass
+class ConfirmedPrimaryTab:
+    guard: object
+    target: str
+    session: str
+    generation: int
+    browser: object
+    page: object
+    stop_code: str | None = None
+
+    def same_owning_session(self, guard):
+        owner = guard.session_states.get(self.session)
+        return bool(self.guard is guard and not self.stop_code and not guard.failed
+                    and not guard.blocking_hosts and guard.primary_session == self.session
+                    and owner and owner.target == self.target and owner.generation == self.generation
+                    and getattr(owner, 'attached', True) and not getattr(owner, 'destroyed', False)
+                    and not getattr(owner, 'crashed', False)
+                    and guard.current_sessions.get(self.target) == self.session)
+
+    async def require_current(self, browser, *, allow_document_transition=False):
+        if self.stop_code:
+            raise TabProtectionError(self.stop_code)
+        if browser.browser is not self.browser or browser.page is not self.page or browser.guard is not self.guard:
+            raise TabProtectionError('OPERATOR_CONFIRMED_TAB_OR_SESSION_CHANGED')
+        active = await self.browser.context.active_page()
+        if self.stop_code:
+            raise TabProtectionError(self.stop_code)
+        if (not active or active.page_id != self.page.page_id or not self.same_owning_session(self.guard)
+                or not allow_document_transition and not self.guard.primary_observable()):
+            raise TabProtectionError('OPERATOR_CONFIRMED_TAB_OR_SESSION_CHANGED')
+
+
+def bind_confirmed_primary_tab(browser, *, route_allowed=None):
+    guard = browser.guard
+    owner = guard.session_states.get(guard.primary_session)
+    if not owner or not guard.primary_observable() or guard.blocking_hosts:
+        raise TabProtectionError('OPERATOR_CONFIRMED_TAB_UNAVAILABLE')
+    binding = ConfirmedPrimaryTab(guard, owner.target, owner.session, owner.generation,
+                                  browser.browser, browser.page)
+    previous = guard.navigation_observer
+
+    def latch_departure(kind, session, url, **kwargs):
+        if (session == binding.session and not binding.stop_code and
+                kind in {'DOCUMENT_REQUEST', 'DOCUMENT_COMMITTED', 'SAME_DOCUMENT_NAVIGATION'}):
+            if urlsplit(url).hostname == urlsplit(browser.config.login_url).hostname:
+                binding.stop_code = 'OPERATOR_CONFIRMED_SESSION_REDIRECTED_TO_SIGN_IN'
+            elif route_allowed is not None and not route_allowed(url):
+                binding.stop_code = 'OPERATOR_TENANT_ROUTE_CHANGED'
+            if binding.stop_code:
+                tab_diagnostic(browser, binding.stop_code)
+        if previous:
+            previous(kind, session, url, **kwargs)
+
+    guard.navigation_observer = latch_departure
+    return binding
+
+
 def bound_tab_observable(guard,binding):
+    if isinstance(binding, ConfirmedPrimaryTab):
+        return binding.same_owning_session(guard) and guard.primary_observable()
     if binding.guard is not guard or not guard.primary_observable():return False
     source=guard.session_states.get(binding.source_session)
     owner=guard.session_states.get(binding.session)

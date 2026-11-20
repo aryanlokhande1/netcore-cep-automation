@@ -1,5 +1,13 @@
 # Known limitations and evidence
 
+19 November P0 repair: [execution audit and manual command](whatsapp-p0-execution-repair.md).
+Offline deterministic checks now cover genuine Deep Agents tool/Teacher routing
+and candidate hash/reload. No live retest occurred. The repaired observation uses
+the installed Stagehand accessibility snapshot; model-backed Stagehand observe/act
+remains unavailable. A new model-callable Next Step action was not implemented:
+automatic approval review required separate authorization for that restricted
+operation. Existing controller persistence gates remain in force.
+
 Login audit of run 21e386ec9b0243db8ed92c079eb16ffa: expected application host and
 healthy primary page are recorded, but exact tenant/authenticated-resource proof
 and a reviewed evidence document were absent. Its lone saved heading belongs to
@@ -23,6 +31,14 @@ only; real dropdown/Observer recovery remains unverified.
 
 V2 is IMPLEMENTED — NOT LIVE VERIFIED. Static checks do not prove provider APIs,
 tenant selectors, widget handling, screenshots, record resources or persistence.
+
+The human-assisted Login/WhatsApp diagnostic is also not live verified until its
+single authorized headed session completes. Operator-selected evidence and visual
+confirmation do not satisfy authentication predicates. If the Login verifier remains
+incomplete, only the separately consented read-only route can test browser/tool
+integration; that result is not authenticated success. Setup, Audience, Content and
+Schedule remain `UNVERIFIED` unless current-page evidence establishes them. The
+18 November 18:00 schedule is not part of this diagnostic.
 
 ## Immediate blockers
 

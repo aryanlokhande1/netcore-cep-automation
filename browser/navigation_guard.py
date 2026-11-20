@@ -5,11 +5,31 @@ No headers, bodies, cookies or full request URLs leave this object's memory.
 """
 import asyncio
 import json
+import hashlib
 from urllib.parse import urlsplit
 import httpx
 import websockets
 from time import monotonic
 from browser.guard_state import GuardSession,SessionDetached
+
+
+class GuardProtocolError(RuntimeError):
+    """Keep Chromium's safe diagnostic identity, never its arbitrary error text."""
+    def __init__(self,error):
+        super().__init__('CDP_PROTOCOL_REJECTED')
+        value=error.get('code')
+        self.protocol_code=value if type(value) is int else None
+        message=error.get('message')
+        self.protocol_reason={'Invalid InterceptionId.':'INVALID_INTERCEPTION_ID',
+            'Invalid InterceptionId':'INVALID_INTERCEPTION_ID',
+            'Session with given id not found.':'SESSION_NOT_FOUND',
+            'No target with given id found':'TARGET_NOT_FOUND'}.get(message,'UNCLASSIFIED_PROTOCOL_ERROR')
+        self.protocol_error_sha256=hashlib.sha256(json.dumps(error,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
+
+def protocol_diagnostic(error):
+    return {key:getattr(error,key) for key in ('protocol_code','protocol_reason','protocol_error_sha256')
+        if isinstance(error,GuardProtocolError)}
 
 # Only page/frame targets can issue Document navigations. Never pause unrelated workers.
 DOCUMENT_TARGET_FILTER=[{'type':'page'},{'type':'iframe'},{'exclude':True}]
@@ -50,6 +70,7 @@ class NavigationGuard:
         self.context_snapshot=lambda:{}
         self.last_document_decision=None
         self.navigation_observer=None
+        self.document_requests={};self.network_serial=0;self.frame_aliases={}
 
     def notify_navigation(self,kind,session,url,*,redirect=False):
         # Optional, scoped telemetry cannot change interception/authorization.
@@ -101,8 +122,8 @@ class NavigationGuard:
         self.lifecycle_changed.set()
         kinds={'TimeoutError':'TIMEOUT','JSONDecodeError':'INVALID_PROTOCOL_JSON',
             'ConnectionClosedError':'CONNECTION_CLOSED','ConnectionClosedOK':'CONNECTION_CLOSED',
-            'RuntimeError':'COMMAND_OR_PROTOCOL_FAILURE'}
-        self.failure_diagnostic={'stage':stage,'category':category or (kinds.get(type(error).__name__,'PROTOCOL_FAILURE') if error else 'PROTECTION_UNCERTAIN'),'guard':context}
+            'RuntimeError':'COMMAND_OR_PROTOCOL_FAILURE','GuardProtocolError':'COMMAND_OR_PROTOCOL_FAILURE'}
+        self.failure_diagnostic={'stage':stage,'category':category or (kinds.get(type(error).__name__,'PROTOCOL_FAILURE') if error else 'PROTECTION_UNCERTAIN'),'guard':context,**protocol_diagnostic(error)}
         if code:self.failure_diagnostic['code']=code
         session=getattr(error,'guard_session',None)
         method=getattr(error,'guard_method',None)
@@ -312,7 +333,7 @@ class NavigationGuard:
         except Exception as error:
             error.guard_session=session;error.guard_method=method
             self.record('COMMAND_FAILED',session=session,command=method,duration_ms=round(1000*(monotonic()-started),1),
-                category='TIMEOUT' if isinstance(error,TimeoutError) else 'COMMAND_OR_TRANSPORT_FAILURE',detached=session in self.detached)
+                category='TIMEOUT' if isinstance(error,TimeoutError) else 'COMMAND_OR_TRANSPORT_FAILURE',detached=session in self.detached,**protocol_diagnostic(error))
             raise
         finally:
             self.pending.pop(serial,None);self.operations.pop(serial,None)
@@ -325,7 +346,7 @@ class NavigationGuard:
                     future = self.pending.pop(event["id"], None)
                     if future and not future.done():
                         if "error" in event:
-                            future.set_exception(RuntimeError("CDP guard rejected command"))
+                            future.set_exception(GuardProtocolError(event['error']))
                         else:
                             future.set_result(event.get("result", {}))
                 elif event.get("method") in {"Target.attachedToTarget", "Fetch.requestPaused"}:
@@ -338,10 +359,11 @@ class NavigationGuard:
                     self.target_event(event)
                 elif event.get('method') in {'Page.frameAttached','Page.frameNavigated','Page.frameDetached','Page.navigatedWithinDocument'}:
                     self.frame_event(event)
-                elif event.get('method') in {'Network.requestWillBeSent','Network.responseReceived'} and self.readonly_observer:
-                    # Observer reads only request method/URL and response status/MIME, never headers/cookies.
-                    try:self.readonly_observer(event)
-                    except Exception:self.readonly_observer=None
+                elif event.get('method') in {'Network.requestWillBeSent','Network.responseReceived','Network.loadingFinished','Network.loadingFailed'}:
+                    self.network_event(event)
+                    if self.readonly_observer and event['method'] in {'Network.requestWillBeSent','Network.responseReceived'}:
+                        try:self.readonly_observer(event)
+                        except Exception:self.readonly_observer=None
         except asyncio.CancelledError as error:
             self.reader_state='CANCELLED'
             if not self.closing:self.fail_closed('READER_CANCELLED',error,code='PRIMARY_TARGET_UNAVAILABLE',category='READER_CANCELLED')
@@ -472,16 +494,65 @@ class NavigationGuard:
             return safe
         return False
 
+    def network_event(self,event):
+        """Independent document lifecycle only; never retain headers/body/URL."""
+        p=event.get('params',{});session=event.get('sessionId');key=(session,p.get('requestId'))
+        owner=self.session_states.get(session);method=event['method']
+        if not owner or not owner.attached:return
+        if method=='Network.requestWillBeSent' and p.get('type')=='Document':
+            self.network_serial+=1
+            self.document_requests.pop(key,None)
+            self.document_requests[key]={'alias':self.network_serial,'generation':owner.generation,
+                'frame':p.get('frameId'),'responded':False,'terminal':None,'cancelled':False}
+            while len(self.document_requests)>256:self.document_requests.pop(next(iter(self.document_requests)))
+        elif key in self.document_requests:
+            item=self.document_requests[key]
+            if item['generation']!=owner.generation:return
+            if method=='Network.responseReceived':item['responded']=True
+            elif method in {'Network.loadingFinished','Network.loadingFailed'}:
+                item.update(terminal=method,cancelled=method=='Network.loadingFailed' and p.get('canceled') is True)
+                self.record('DOCUMENT_REQUEST_TERMINAL',session=session,network_request=item['alias'],
+                    completion='CANCELLED' if item['cancelled'] else 'FINISHED' if method=='Network.loadingFinished' else 'FAILED',
+                    response_observed=item['responded'])
+                self.lifecycle_changed.set()
+
+    async def prove_cancelled_request(self,session,item):
+        """No resend: recover only a denied child whose exact network load ended."""
+        deadline=monotonic()+.25
+        while True:
+            self.lifecycle_changed.clear()
+            owner=self.session_states.get(session);network=item.get('network_record')
+            if (item['scope']!='subframe' or not item.get('document_request') or not owner or owner.generation!=item.get('generation')
+                or not self.session_observable(session) or not self.primary_observable()
+                or not self.parent_is_protected(owner) or not network
+                or self.document_requests.get((session,item.get('network_id'))) is not network
+                or network['generation']!=owner.generation or not item.get('frame_id')
+                or network['frame']!=item['frame_id'] or network['responded']):return False
+            if network['terminal'] is not None:
+                return network['terminal']=='Network.loadingFailed' and network['cancelled'] is True
+            remaining=deadline-monotonic()
+            if remaining<=0:return False
+            try:await asyncio.wait_for(self.lifecycle_changed.wait(),remaining)
+            except TimeoutError:return False
+
     def register_request(self,event):
         p=event['params'];session=event.get('sessionId');key=(session,p['requestId'])
         if key in self.paused_requests:return self.paused_requests[key]
         self.request_aliases.setdefault(key,len(self.request_aliases)+1)
         owner=self.session_states.get(session)
-        item={'alias':self.request_aliases[key],'scope':self.document_scope(session,p.get('frameId'))}
+        network=self.document_requests.get((session,p.get('networkId')))
+        frame=p.get('frameId')
+        if frame:self.frame_aliases.setdefault(frame,len(self.frame_aliases)+1)
+        item={'alias':self.request_aliases[key],'scope':self.document_scope(session,frame),
+            'frame_id':frame,'generation':owner.generation if owner else None,
+            'network_id':p.get('networkId'),'network_record':network,
+            'document_request':p.get('resourceType')=='Document'}
         self.paused_requests[key]=item
         self.record('REQUEST_PAUSED',session=session,request=item['alias'],scope=item['scope'],
             kind=owner.kind if owner else 'unknown',resource='Document' if p.get('resourceType')=='Document' else 'other',
-            redirect=bool(p.get('redirectedRequestId')),primary_observable=self.primary_observable())
+            redirect=bool(p.get('redirectedRequestId')),primary_observable=self.primary_observable(),
+            frame=self.frame_aliases.get(frame),network_request=network['alias'] if network else None,
+            request_id_sha256=hashlib.sha256(p['requestId'].encode()).hexdigest())
         if item['scope']=='top_level' and p.get('resourceType')=='Document':
             self.notify_navigation('DOCUMENT_REQUEST',session,p.get('request',{}).get('url',''),redirect=bool(p.get('redirectedRequestId')))
         return item
@@ -517,6 +588,16 @@ class NavigationGuard:
         except SessionDetached:
             if await self.detached_completion(owner):return
             raise
+        except GuardProtocolError as error:
+            if (decision=='Fetch.failRequest' and error.protocol_code==-32602
+                and error.protocol_reason=='INVALID_INTERCEPTION_ID'
+                and await self.prove_cancelled_request(session,item)):
+                self.paused_requests.pop(key,None)
+                self.record('REQUEST_COMPLETED',session=session,request=item['alias'],command=decision,
+                    network_request=item['network_record']['alias'],completion='CANCELLED_NETWORK_PROVEN',
+                    code='REQUEST_CANCELLATION_INDEPENDENTLY_CONFIRMED',**protocol_diagnostic(error))
+                return
+            raise
 
     async def _event(self,event):
         owner=None
@@ -532,6 +613,7 @@ class NavigationGuard:
             if owner.kind not in {'page','iframe'}:raise RuntimeError('Unexpected target type')
             self.session_frames[session]=(owner.kind,None)
             await self.send('Fetch.enable',{'patterns':[{'urlPattern':'*','resourceType':'Document','requestStage':'Request'}]},session)
+            await self.send('Network.enable',session=session)
             owner.intercepting=True
             self.lifecycle_changed.set()
             await self.send('Target.setAutoAttach',auto_attach_settings(),session)

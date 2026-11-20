@@ -1,6 +1,7 @@
 """Protected read-only Setup observation and separately authorized fixed actions."""
 import asyncio
 import base64
+import hashlib
 import json
 import re
 from urllib.parse import urlsplit
@@ -759,20 +760,39 @@ def readonly_whatsapp_destination(source,destination,origin):
 class V2BrowserTools:
     """Canonical task tools. Model arguments never contain values or selectors."""
 
-    def __init__(self,browser,payload,ui,authorization,directory):
+    def __init__(self,browser,payload=None,ui=None,authorization=None,directory=None,*,diagnostic_origin=None):
         from pathlib import Path
-        self.browser,self.payload,self.ui,self.authorization=browser,payload,ui,authorization
-        self.directory=Path(directory);self.stage='setup';self.references={};self.events=[]
+        self.diagnostic_mode=diagnostic_origin is not None
+        if getattr(self,'diagnostic_mode',False):
+            from urllib.parse import urlsplit
+            from modules.whatsapp.contract import V2Stop
+            target=urlsplit(SETUP_URL)
+            expected_origin=f'{target.scheme}://{target.netloc}'
+            if (payload is not None or ui is not None or authorization is not None or directory is not None or
+                diagnostic_origin!=expected_origin or diagnostic_origin not in getattr(browser.policy,'origins',set())):
+                raise V2Stop('INVALID_READONLY_DIAGNOSTIC_CONTEXT',owner='authorization')
+            self.browser,self.payload,self.ui,self.authorization=browser,None,None,None
+            self.directory=None;self.origin=diagnostic_origin
+        else:
+            if payload is None or ui is None or authorization is None or directory is None:
+                raise ValueError('Production V2 tools require the complete campaign context')
+            self.browser,self.payload,self.ui,self.authorization=browser,payload,ui,authorization
+            self.directory=Path(directory);self.origin=ui.origin
+        self.stage='diagnostic' if self.diagnostic_mode else 'setup';self.references={};self.events=[]
         self.images={};self.preparation='DIRECT';self.mutations=0;self.terminal=None
         self.pending_write=False;self.next_allowed=False;self.lock=asyncio.Lock()
         self.waba_selected=False;self.waba_opened=False;self.records_before=None
         self.preparations={};self.failed_approaches={};self.last_observation=None
         self.native_open_attempts=set()
-        self.read_only=False;self.start_state_verified=False
-        self.reviewed_fields=set(ui.fields) if ui.reviewed else set()
-        self.reviewed_stages=set(ui.stage_selectors) if ui.reviewed else set()
+        self.last_independent_readback = {}
+        self.read_only=self.diagnostic_mode;self.start_state_verified=False
+        self.reviewed_fields=set() if self.diagnostic_mode else set(ui.fields) if ui.reviewed else set()
+        self.reviewed_stages=set() if self.diagnostic_mode else set(ui.stage_selectors) if ui.reviewed else set()
         self.observed_bindings={}
         self.preview_identity=None
+        if self.diagnostic_mode:
+            self.baseline=None
+            return
         from modules.whatsapp.browser_baseline import BrowserBaseline
         import re as regex
         ids=regex.findall(r'\d{8,}',payload.waba)
@@ -781,27 +801,56 @@ class V2BrowserTools:
         self.baseline=BrowserBaseline(browser,values=values,commit_guard=self.install_guard)
 
     async def install_guard(self):
+        if getattr(self,'diagnostic_mode',False):
+            from modules.whatsapp.contract import V2Stop
+            raise V2Stop('READONLY_DIAGNOSTIC_NO_PAGE_MUTATION',owner='authorization')
         # Keep global forbidden actions blocked; only the controller opens an
         # exact reviewed advance/save window. Login's existing guard is untouched.
-        await self.browser.page.evaluate(r'''(()=>{
+        installed=await self.browser.page.evaluate(r'''(()=>{
           if(window.__netcoreV2Guard)return true;window.__netcoreV2Guard=true;
           const deny=e=>{e.preventDefault();e.stopImmediatePropagation();};
           document.addEventListener('click',e=>{const n=e.target.closest('button,a,input[type=submit],[role=button]');
             if(!n)return;const t=(n.textContent||n.value||'').trim();
             if(/publish|activate|send\s+(test|now)|finish\s+later/i.test(t))return deny(e);
-            if((/next\s+step|save|schedule\s+now/i.test(t)||n.type==='submit')&&!window.__netcoreV2Advance)deny(e);
+            if((/next\s+step|save|schedule\s+now/i.test(t)||n.type==='submit')&&!window.__netcoreV2Advance){
+              const grant=window.__netcoreV2Page1Next;
+              if(grant?.control===n&&!grant.clicked&&/^next\s+step$/i.test(t))grant.clicked=true;
+              else deny(e);
+            }
           },true);
-          document.addEventListener('submit',e=>{if(!window.__netcoreV2Advance)deny(e)},true);
+          document.addEventListener('submit',e=>{
+            if(window.__netcoreV2Advance)return;
+            const grant=window.__netcoreV2Page1Next;
+            if(grant?.clicked&&!grant.submitted&&e.submitter===grant.control&&e.target===grant.control.form){
+              grant.submitted=true;return;
+            }
+            deny(e);
+          },true);
           return true;
         })()''')
+        if installed is not True:
+            from modules.whatsapp.contract import V2Stop
+            raise V2Stop('COMMIT_GUARD_NOT_INSTALLED',owner='authorization',unsafe=True)
 
     async def protect(self):
         from modules.whatsapp.contract import V2Stop
         from modules.whatsapp.browser_baseline import reject_security_negatives
         from urllib.parse import urlsplit
-        if self.terminal:raise V2Stop(self.terminal,unsafe=True)
+        if self.terminal:raise V2Stop(self.terminal,owner=getattr(self,'terminal_owner','browser'),unsafe=True)
+        binding = getattr(self.browser, 'setup_binding', None)
+        operator_binding = getattr(self, 'operator_setup_binding', None)
+        if operator_binding is not None:
+            login_binding = self.operator_login_binding
+            stop = self.operator_setup_stop() or login_binding.stop_code
+            if stop:
+                raise V2Stop(stop, owner='browser', unsafe=True)
+            if (binding is not operator_binding or self.browser.browser is not login_binding.browser
+                    or not login_binding.same_owning_session(self.browser.guard)):
+                raise V2Stop('OPERATOR_SETUP_TAB_OR_SESSION_CHANGED', owner='browser', unsafe=True)
         await self.browser.guard.ensure_observable()
         before=protected_document(self.browser)
+        if operator_binding is not None and getattr(self, 'operator_approved_setup_document', before) != before:
+            raise V2Stop('OPERATOR_APPROVED_SETUP_DOCUMENT_CHANGED', owner='browser', unsafe=True)
         if self.browser.page is not self.browser.setup_page:raise V2Stop('SDK_PAGE_BINDING_CHANGED',owner='browser',unsafe=True)
         active=await self.browser.browser.context.active_page()
         if active is None or active.page_id!=self.browser.setup_page.page_id:raise V2Stop('PROTECTED_TASK_TAB_NOT_ACTIVE',owner='browser',unsafe=True)
@@ -815,19 +864,96 @@ class V2BrowserTools:
             coherent=(first==current==second and frame.get('id')==before[4] and
                 (frame.get('loaderId') or None)==before[5] and before==protected_document(self.browser))
             if coherent:break
-        actual=urlsplit(second)
-        if not coherent or f'{actual.scheme}://{actual.netloc}'!=self.ui.origin:
+        expected_origin=self.origin if getattr(self,'diagnostic_mode',False) else self.ui.origin
+        if not coherent:
             raise V2Stop('PROTECTED_URL_OR_DOCUMENT_MISMATCH',owner='browser',unsafe=True)
+        from modules.whatsapp.destination import protected_route_status,navigation_url_difference
+        diagnostic=getattr(self,'diagnostic_mode',False)
+        status=protected_route_status(second,expected_origin=expected_origin,
+            expected_tenant=None if diagnostic else self.ui.tenant,
+            origin_permitted=self.browser.policy.permits(second),enforce_tenant=not diagnostic,
+            campaign_stage=getattr(self, 'campaign_verified_stage', None))
+        previous_url=getattr(self,'_protected_route_url',None)
+        previous_document=getattr(self,'_protected_route_document',None)
+        changed=(navigation_url_difference(previous_url,second) if status['route'] is not None else ['url_syntax']) if previous_url is not None else []
+        document_changed=previous_document is not None and previous_document!=before
+        if changed or document_changed:
+            # A permitted transition is not permission to reuse stale controls or
+            # a prior controller certificate. Every next interaction reobserves.
+            self.references.clear();self.images.clear();self.observed_bindings.clear()
+            self.next_allowed=False
+        if document_changed:
+            self.last_independent_readback = {}
+            for cache in ('native_open_attempts','preparations','failed_approaches'):
+                getattr(self,cache,{}).clear()
+            self.waba_opened=False;self.waba_selected=False
+        if previous_url is None or changed or document_changed or status['code']:
+            self.browser.trace.agent_event('protected_task_route',role='controller',
+                **status,initial_route=getattr(self,'_initial_protected_route',None),
+                previous_route=getattr(self,'_last_protected_route',None),
+                changed_components=changed,document_changed=document_changed,
+                target_alias=getattr(self.browser.guard,'target_aliases',{}).get(before[0]),
+                session_alias=getattr(self.browser.guard,'session_aliases',{}).get(before[1]),
+                generation=before[2],document_generation=before[3],
+                authentication_grant=False)
+        if status['code']:raise V2Stop(status['code'],owner='authorization',unsafe=True)
+        if operator_binding is not None:
+            from modules.whatsapp.destination import classify_setup_page
+            from modules.whatsapp.contract import SETUP_URL
+            from modules.whatsapp.destination import campaign_step_route
+            if not (classify_setup_page(second, SETUP_URL)['route_match'] or
+                    campaign_step_route(second, getattr(self, 'campaign_verified_stage', None))):
+                raise V2Stop('OPERATOR_SETUP_ROUTE_MISMATCH', owner='authorization', unsafe=True)
+        if not hasattr(self,'_initial_protected_route'):self._initial_protected_route=status['route']
+        self._last_protected_route=status['route']
+        self._protected_route_url=second;self._protected_route_document=before
+        if getattr(self,'diagnostic_mode',False):
+            previous=getattr(self,'_diagnostic_observed_url',None)
+            if previous is not None and previous!=second:
+                self.references.clear()
+                self.browser.trace.agent_event('diagnostic_references_invalidated',role='controller',
+                    reason='CURRENT_PAGE_URL_CHANGED',authentication_grant=False)
+            self._diagnostic_observed_url=second
         await reject_security_negatives(self.browser)
         if before!=protected_document(self.browser):raise V2Stop('DOCUMENT_CHANGED',owner='browser',unsafe=True)
         self.browser.budget()
         return before
 
-    async def observe(self):
-        from modules.whatsapp.observation import explore_v2
+    async def _whatsapp_page_observed(self):
+        return await self.browser.page.evaluate(r'''(()=>
+          [...document.querySelectorAll('main h1,main h2,[role=main] [role=heading],h1')].some(e=>
+            e.getClientRects().length>0&&getComputedStyle(e).visibility!=='hidden'&&
+            !e.closest('nav,[role=navigation],header,[role=banner],[role=alert],[role=dialog],dialog')&&
+            /\bwhats\s*app\b/i.test((e.textContent||'').trim())))()''')
+
+    async def observe(self,*,strategy=None):
+        from modules.whatsapp.observation import explore_v2,wait_for_setup_change
         document=await self.protect()
+        if strategy:self.observation_strategy=strategy
+        strategy=strategy or getattr(self,'observation_strategy',None)
+        extra={'strategy':strategy} if strategy else {}
+        campaign_stage = getattr(self, 'campaign_verified_stage', None)
+        if campaign_stage == self.stage and campaign_stage in {'audience', 'content'}:
+            extra['campaign_walkthrough'] = True
+        field = getattr(self, 'page1_current_field', None)
+        if field is not None:
+            extra['current_field'] = field
         data=await explore_v2(self.browser,self.ui,self.payload,self.stage,
-            reviewed_fields=self.reviewed_fields,reviewed_stages=self.reviewed_stages)
+            reviewed_fields=self.reviewed_fields,reviewed_stages=self.reviewed_stages,**extra)
+        recognition_attempts=1
+        while self.stage=='setup' and data.get('stage_visible') is not True and recognition_attempts<3:
+            self.browser.trace.agent_event('setup_observation_retry',role='observer',
+                attempt=recognition_attempts+1,
+                field_candidate_count=len(data.get('field_candidates',[])),
+                scope_basis=data.get('scope_basis','UNRESOLVED'),
+                observation_scope=data.get('observation_scope','DOCUMENT_LIGHT_DOM'))
+            await wait_for_setup_change(self.browser)
+            if await self.protect()!=document:
+                from modules.whatsapp.contract import V2Stop
+                raise V2Stop('OBSERVATION_DOCUMENT_CHANGED',owner='browser',unsafe=True)
+            data=await explore_v2(self.browser,self.ui,self.payload,self.stage,
+                reviewed_fields=self.reviewed_fields,reviewed_stages=self.reviewed_stages,**extra)
+            recognition_attempts+=1
         if await self.protect()!=document:
             from modules.whatsapp.contract import V2Stop
             raise V2Stop('OBSERVATION_DOCUMENT_CHANGED',owner='browser',unsafe=True)
@@ -840,7 +966,12 @@ class V2BrowserTools:
         candidates=data.get('field_candidates',[])
         current_proofs={}
         if data.get('scope_selector') and data.get('stage_visible'):
-            scope_identity=await observed_node(self.browser,data['scope_selector'])
+            try:scope_identity=await observed_node(self.browser,data['scope_selector'])
+            except SetupStop as error:
+                if error.code!='CONTROL_IDENTITY_NOT_UNIQUE':raise
+                # An ambiguous recognizer result is evidence, never a write grant.
+                data={**data,'stage_visible':False,'discovered_bindings':{}}
+                scope_identity=None
             scopes[self.stage]=data['scope_selector']
             if self.stage=='preview' and data.get('preview_identity_selector'):
                 q=data['preview_identity_selector']
@@ -854,8 +985,16 @@ class V2BrowserTools:
                     proposed=ReviewedUI.model_validate({**self.ui.model_dump(),'fields':{**updates,field:binding},'stage_selectors':scopes})
                 except ValueError:continue
                 updates=dict(proposed.fields)
-                current_proofs[field]={'identity':await observed_node(self.browser,binding.selector),
-                    'scope_identity':scope_identity,'field_label':matching[0]['field_label'],'stage':self.stage}
+                try:identity=await observed_node(self.browser,binding.selector)
+                except SetupStop as error:
+                    if error.code!='CONTROL_IDENTITY_NOT_UNIQUE':raise
+                    updates.pop(field,None)
+                    self.browser.trace.agent_event('observation_control_skipped',role='observer',
+                        stage=self.stage,reason=error.code,field=field,field_bound=False)
+                    continue
+                current_proofs[field]={'identity':identity,
+                    'scope_identity':scope_identity,'field_label':matching[0]['field_label'],'stage':self.stage,
+                    'strategy':strategy or 'semantic'}
         self.observed_bindings={k:v for k,v in self.observed_bindings.items() if k not in STAGE_FIELDS[self.stage]}
         self.observed_bindings.update(current_proofs)
         patch={'fields':updates,'stage_selectors':scopes}
@@ -869,21 +1008,44 @@ class V2BrowserTools:
         self.references={};public=[]
         for node in data['nodes']:
             reference=uuid4().hex
-            identity=await observed_node(self.browser,node['selector'])
+            try:identity=await observed_node(self.browser,node['selector'])
+            except SetupStop as error:
+                if error.code!='CONTROL_IDENTITY_NOT_UNIQUE':raise
+                current_proofs.pop(node.get('field'),None)
+                self.observed_bindings.pop(node.get('field'),None)
+                self.browser.trace.agent_event('observation_control_skipped',role='observer',
+                    stage=self.stage,reason=error.code,field_bound=False)
+                continue
             self.references[reference]={**node,'identity':identity,'stage':self.stage}
             public.append({'reference':reference,**{k:node[k] for k in
-                ('field','part','tag','role','type','label','enabled','expanded','exact','create','selected_exact','checked','option_facts')}})
+                ('field','part','tag','role','type','label','enabled','expanded','exact','create',
+                 'selected_exact','checked','value_present','selected_count','invalid',
+                 'validation_error_present','option_facts') if k in node}})
         result={'stage':self.stage,'stage_visible':data['stage_visible'],'controls':public,
             'truncated':data.get('truncated',False),'pending_write':self.pending_write,
             'read_only_discovery':self.read_only,'field_evidence':sorted(current_proofs),
+            'recognition_attempts':recognition_attempts,'strategy':strategy or 'semantic',
+            'scope_basis':data.get('scope_basis','UNRESOLVED'),
+            'observation_scope':data.get('observation_scope','DOCUMENT_LIGHT_DOM'),
+            'observation_counts':data.get('observation_counts',{}),
+            'closed_shadow_scope_certified':data.get('closed_shadow_scope_certified',False),
+            'persistence_allowed':self.authorization.persistence,
             'unresolved_fields':[f for f in STAGE_FIELDS[self.stage] if f not in self.reviewed_fields and f not in current_proofs]}
+        if 'ga_tracking' in result['unresolved_fields'] and data.get('ga_row_evidence') is not None:
+            result['ga_row_evidence'] = data['ga_row_evidence']
+        if self.stage == 'audience' and result['unresolved_fields']:
+            result['audience_picker_evidence'] = data.get('audience_picker_evidence', [])
+        if data.get('scoped_option_evidence') is not None:
+            result['scoped_option_evidence'] = data['scoped_option_evidence']
+        result['binding_failures'] = {
+            field: ('MULTIPLE_VISIBLE_LABELLED_CONTROLS' if sum(c['field'] == field for c in candidates) > 1 else
+                    'NO_VISIBLE_CONTROL_WITH_EXACT_FIELD_LABEL' if not any(c['field'] == field for c in candidates) else
+                    'CONTROL_OR_FORM_OWNERSHIP_UNPROVEN')
+            for field in result['unresolved_fields']
+        }
         if self.read_only:
             result['navigation']=await self.readonly_navigation_links(document)
-            result['whatsapp_page_observed']=await self.browser.page.evaluate(r'''(()=>
-              [...document.querySelectorAll('main h1,main h2,[role=main] [role=heading],h1')].some(e=>
-                e.getClientRects().length>0&&getComputedStyle(e).visibility!=='hidden'&&
-                !e.closest('nav,[role=navigation],header,[role=banner],[role=alert],[role=dialog],dialog')&&
-                /\bwhats\s*app\b/i.test((e.textContent||'').trim())))()''')
+            result['whatsapp_page_observed']=await self._whatsapp_page_observed()
         from app.config import ROOT
         private=ROOT/'credentials'/'whatsapp-v2'/self.browser.trace.run_id/('ui-discovery-'+uuid4().hex+'.json')
         private.parent.mkdir(parents=True,exist_ok=True)
@@ -896,7 +1058,140 @@ class V2BrowserTools:
         evidence=self.browser.trace.agent_event('dom_observation',role='observer' if self.browser.trace.agent_phase=='observer' else 'doer',result=result,
             private_evidence_ref=private.relative_to(ROOT).as_posix(),evidence_policy='STRUCTURAL_ONLY_NO_RAW_DOM')
         result['evidence_ref']=evidence;self.last_observation=result
+        if self.stage == 'setup' and getattr(self.authorization, 'manual_form_test', False):
+            actionable = [node['field'] for node in public
+                          if node.get('field') in current_proofs and node.get('enabled') is True
+                          and node.get('part') == 'control']
+            self.browser.trace.agent_event('setup_form_readiness', role='observer',
+                stage_visible=data['stage_visible'], actionable_fields=sorted(set(actionable)),
+                unresolved_fields=result['unresolved_fields'], evidence_ref=evidence)
         return result
+
+    async def observe_diagnostic(self):
+        from modules.whatsapp.observation import explore_v2
+        from modules.whatsapp.contract import V2Stop
+        if not getattr(self,'diagnostic_mode',False):raise V2Stop('READONLY_DIAGNOSTIC_CONTEXT_REQUIRED',owner='authorization')
+        document=await self.protect()
+        data=await explore_v2(self.browser,None,None,'diagnostic',diagnostic=True)
+        if not isinstance(data,dict) or not isinstance(data.get('nodes'),list):
+            raise V2Stop('DIAGNOSTIC_OBSERVATION_INVALID',owner='tool')
+        if await self.protect()!=document:
+            raise V2Stop('OBSERVATION_DOCUMENT_CHANGED',owner='browser',unsafe=True)
+        self.references={}
+        public=[]
+        public_labels={'campaign','campaigns','whatsapp','whatsapp campaigns','create campaign','new campaign',
+            'setup','audience','content','schedule','campaign name','waba id','business number','add tags',
+            'ga tracking','lists/segments','send later','frequency cap','contact limit','search','close','cancel'}
+        public_tags={'INPUT','TEXTAREA','SELECT','BUTTON','A','DIV','SPAN'}
+        public_roles={'button','link','combobox','option','searchbox','checkbox','radio','switch','tab','menuitem'}
+        public_types={'text','search','checkbox','radio','button','submit','date','time','select-one','select-multiple'}
+        for node in data['nodes']:
+            selector=node.get('selector')
+            if not isinstance(selector,str) or not selector:continue
+            identity=await observed_node(self.browser,selector)
+            reference=uuid4().hex
+            label=node.get('label')
+            if label not in public_labels:label=None
+            tag=node.get('tag') if node.get('tag') in public_tags else 'OTHER'
+            role=node.get('role') if node.get('role') in public_roles else None
+            control_type=node.get('type') if node.get('type') in public_types else None
+            enabled=node.get('enabled') if type(node.get('enabled')) is bool else None
+            expanded=node.get('expanded') if type(node.get('expanded')) is bool else None
+            checked=node.get('checked') if type(node.get('checked')) is bool else None
+            value_present=node.get('value_present') if type(node.get('value_present')) is bool else None
+            selected_count=node.get('selected_count') if type(node.get('selected_count')) is int and node['selected_count']>=0 else None
+            entry={'selector':selector,'identity':identity,'stage':self.stage,'part':'control',
+                'label':label,'tag':tag,'role':role,'type':control_type,
+                'enabled':enabled,'expanded':expanded,'checked':checked,
+                'value_present':value_present,'selected_count':selected_count}
+            self.references[reference]=entry
+            public.append({'reference':reference,'label':label,'tag':tag,'role':role,
+                'type':control_type,'visible':True,'enabled':enabled,'expanded':expanded,
+                'checked':checked,'value_state':self._redacted_value_state(value_present,tag),
+                'selected_count':selected_count})
+        navigation=await self.readonly_navigation_links(document)
+        if await self.protect()!=document:
+            raise V2Stop('OBSERVATION_DOCUMENT_CHANGED',owner='browser',unsafe=True)
+        result={'mode':'READ_ONLY_DIAGNOSTIC','authentication':'NOT_CERTIFIED',
+            'controls':public,'navigation':navigation,'truncated':data.get('truncated') is True,
+            'whatsapp_page_observed':await self._whatsapp_page_observed()}
+        evidence=self.browser.trace.agent_event('whatsapp_diagnostic_observation',role='doer',
+            result=result,evidence_policy='OPAQUE_REFERENCES_AND_REDACTED_CONTROL_STATE')
+        result['evidence_ref']=evidence;self.last_observation=result
+        return result
+
+    @staticmethod
+    def _redacted_value_state(value_present,tag):
+        if tag not in {'INPUT','TEXTAREA','SELECT'}:return 'NOT_APPLICABLE'
+        if value_present is True:return 'POPULATED_REDACTED'
+        if value_present is False:return 'EMPTY'
+        return 'UNKNOWN_REDACTED'
+
+    async def control_state(self,reference,entry):
+        from modules.whatsapp.contract import V2Stop
+        document=await self.protect()
+        if await observed_node(self.browser,entry['selector'])!=entry['identity']:
+            raise V2Stop('CONTROL_REFERENCE_STALE',owner='browser',unsafe=True)
+        script=r'''(q=>{
+          const a=document.querySelectorAll(q);if(a.length!==1)return null;const e=a[0];
+          const rect=e.getBoundingClientRect(),visible=rect.width>0&&rect.height>0&&
+            getComputedStyle(e).visibility!=='hidden'&&getComputedStyle(e).display!=='none';
+          if(!visible||e.matches('input[type=password],input[type=file],input[type=hidden]'))return null;
+          const selected=e.tagName==='SELECT'?[...e.selectedOptions]:[];
+          const label=e.getAttribute('aria-label')||[...(e.labels||[])].map(n=>n.textContent).join(' ')||
+            (e.getAttribute('aria-labelledby')||'').split(/\s+/).map(id=>document.getElementById(id)?.textContent||'').join(' ')||
+            e.getAttribute('title')||'';
+          const invalid=e.getAttribute('aria-invalid')==='true'||!!e.matches(':invalid');
+          const errorId=e.getAttribute('aria-errormessage'),error=errorId?document.getElementById(errorId):null;
+          const valuePresent=e.matches('input:not([type=hidden]),textarea,select')?
+            (e.type==='checkbox'||e.type==='radio'?e.checked:e.tagName==='SELECT'?selected.length>0:String(e.value||'').length>0):
+            ['checkbox','switch','radio'].includes(e.getAttribute('role'))?
+              (e.getAttribute('aria-checked')==='true'?true:e.getAttribute('aria-checked')==='false'?false:null):null;
+          const checked=typeof e.checked==='boolean'?e.checked:
+            e.getAttribute('aria-checked')==='true'?true:e.getAttribute('aria-checked')==='false'?false:null;
+          return {tag:e.tagName,role:e.getAttribute('role'),type:e.type||null,label,visible,
+            enabled:!e.disabled&&!e.readOnly&&e.getAttribute('aria-disabled')!=='true'&&!e.closest('[inert]'),
+            checked:e.type==='checkbox'||e.type==='radio'||['checkbox','switch','radio'].includes(e.getAttribute('role'))?checked:null,
+            expanded:e.getAttribute('aria-expanded')==='true',value_present:valuePresent,
+            selected_count:e.tagName==='SELECT'?selected.length:null,invalid,
+            validation_error_present:invalid||!!error&&error.getClientRects().length>0&&
+              getComputedStyle(error).visibility!=='hidden'};
+        })'''
+        raw=await self.browser.page.evaluate(script+'('+json.dumps(entry['selector'])+')')
+        if await self.protect()!=document or await observed_node(self.browser,entry['selector'])!=entry['identity']:
+            raise V2Stop('CONTROL_REFERENCE_STALE',owner='browser',unsafe=True)
+        if not isinstance(raw,dict) or raw.get('visible') is not True:
+            raise V2Stop('CONTROL_UNAVAILABLE',owner='recognition')
+        safe_roles={'button','link','combobox','option','searchbox','checkbox','radio','switch','tab','menuitem'}
+        safe_types={'text','search','checkbox','radio','button','submit','date','time','select-one','select-multiple'}
+        tag=raw.get('tag') if raw.get('tag') in {'INPUT','TEXTAREA','SELECT','BUTTON','A','DIV','SPAN'} else 'OTHER'
+        role=raw.get('role') if raw.get('role') in safe_roles else None
+        control_type=raw.get('type') if raw.get('type') in safe_types else None
+        label=raw.get('label') if isinstance(raw.get('label'),str) else entry.get('label')
+        label=' '.join(label.split()).lower() if isinstance(label,str) else None
+        if label not in {'campaign','campaigns','whatsapp','whatsapp campaigns','create campaign','new campaign',
+            'setup','audience','content','schedule','campaign name','waba id','business number','add tags',
+            'ga tracking','lists/segments','send later','frequency cap','contact limit','search','close','cancel'}:
+            label=None
+        result={'reference':reference,'field':entry.get('field'),'label':label,'tag':tag,'role':role,'type':control_type,
+            'visible':True,'enabled':raw.get('enabled') is True,
+            'checked':raw.get('checked') if type(raw.get('checked')) is bool else None,
+            'expanded':raw.get('expanded') is True,
+            'value_state':self._redacted_value_state(raw.get('value_present'),tag),
+            'selected_count':raw.get('selected_count') if type(raw.get('selected_count')) is int else None,
+            'invalid':raw.get('invalid') is True,
+            'validation_error_present':raw.get('validation_error_present') is True}
+        result['evidence_ref']=self.browser.trace.agent_event('control_state_readback',
+            role='observer' if self.browser.trace.agent_phase=='observer' else 'doer',
+            result={k:v for k,v in result.items() if k!='reference'},
+            evidence_policy='OPAQUE_REFERENCE_REDACTED_CONTROL_STATE')
+        return result
+
+    async def diagnostic_control_state(self,reference,entry):
+        from modules.whatsapp.contract import V2Stop
+        if not getattr(self,'diagnostic_mode',False):
+            raise V2Stop('READONLY_DIAGNOSTIC_CONTEXT_REQUIRED',owner='authorization')
+        return await self.control_state(reference,entry)
 
     def binding(self,field):
         from modules.whatsapp.contract import V2Stop
@@ -912,14 +1207,32 @@ class V2BrowserTools:
         if (proof['stage']!=self.stage or await observed_node(self.browser,binding.selector)!=proof['identity'] or
             await observed_node(self.browser,self.ui.stage_selectors[self.stage])!=proof['scope_identity']):
             raise V2Stop('DISCOVERED_FIELD_SCOPE_CHANGED',owner='browser',unsafe=True)
-        label_ok=await self.browser.page.evaluate(r'''(s=>{
+        from modules.whatsapp.observation import V2_LABEL_HELPERS, CAMPAIGN_PICKER_HELPERS
+        label_script = r'''(s=>{''' + V2_LABEL_HELPERS + CAMPAIGN_PICKER_HELPERS + r'''
           const e=document.querySelector(s.q);if(!e)return false;
-          const text=e.getAttribute('aria-label')||[...(e.labels||[])].map(n=>n.textContent).join(' ')||
-            (e.getAttribute('aria-labelledby')||'').split(/\s+/).map(id=>document.getElementById(id)?.textContent||'').join(' ');
-          const kind=e.tagName==='SELECT'?'native_select':e.type==='checkbox'?'checkbox':e.type==='radio'?'radio':
+          const owned=s.campaign&&campaignPickerField(s.field)&&campaignPickerOwners(s.stage)[s.field]===e;
+          const text=owned?s.field.replace('_',' '):fieldLabel(e,s.strategy);
+          const kind=e.tagName==='SELECT'?'native_select':e.type==='checkbox'||e.getAttribute('role')==='checkbox'||
+            (s.field==='ga_tracking'&&e.getAttribute('role')==='switch'&&e.type!=='submit')?'checkbox':
+            e.type==='radio'||e.getAttribute('role')==='radio'?'radio':
             e.getAttribute('role')==='combobox'?'combobox':['INPUT','TEXTAREA'].includes(e.tagName)?'text':null;
-          return String(text).replace(/\s+/g,' ').trim().toLowerCase()===s.label&&kind===s.kind;
-        })(SETTINGS)'''.replace('SETTINGS',json.dumps({'q':binding.selector,'label':proof['field_label'],'kind':binding.kind})))
+          let ownedDisplay=true;
+          if(kind==='combobox'&&s.selected){
+            const a=document.querySelectorAll(s.selected),display=a.length===1?a[0]:null;
+            const parent=e.matches('input,textarea')?e.parentElement:e;
+            const controls=parent?[...parent.querySelectorAll('input,textarea,select,[role=combobox],[role=checkbox],[role=switch],[role=radio]')].filter(n=>n.getClientRects().length>0&&getComputedStyle(n).visibility!=='hidden'):[];
+            const owns=e.contains(display)||parent&&controls.length===1&&controls[0]===e&&parent.contains(display);
+            const ids=((e.getAttribute('aria-controls')||'')+' '+(e.getAttribute('aria-owns')||'')).split(/\s+/).filter(Boolean);
+            ownedDisplay=!!display&&!!owns&&!display.isContentEditable&&!display.matches('input,textarea,[role=option],[role=searchbox]')&&
+              !ids.some(id=>document.getElementById(id)?.contains(display));
+          }
+          return String(text).replace(/\s+/g,' ').trim().toLowerCase()===s.label&&kind===s.kind&&ownedDisplay;
+        })(SETTINGS)'''
+        label_ok = await self.browser.page.evaluate(label_script.replace('SETTINGS',json.dumps(
+            {'q': binding.selector, 'field': field, 'label': proof['field_label'], 'kind': binding.kind,
+             'strategy': proof.get('strategy', 'semantic'), 'selected': binding.selected_selector,
+             'campaign': getattr(self, 'campaign_verified_stage', None) == self.stage,
+             'stage': self.stage})))
         if label_ok is not True:raise V2Stop('DISCOVERED_FIELD_LABEL_CHANGED',owner='recognition')
         return binding
 
@@ -930,7 +1243,11 @@ class V2BrowserTools:
         if await observed_node(self.browser,entry['selector'])!=entry['identity']:
             raise V2Stop('TARGET_IDENTITY_CHANGED',owner='browser',unsafe=True)
         loc=await stagehand_locator(self.browser,entry['selector'],entry['identity'])
-        if not await loc.is_visible(timeout=2000):raise V2Stop('TARGET_NOT_VISIBLE',owner='recognition')
+        if not await loc.is_visible(timeout=2000):
+            if (self.stage != 'audience' or getattr(self, 'campaign_verified_stage', None) != 'audience'
+                    or entry.get('field') != 'audience_type' or entry.get('part') != 'control'):
+                raise V2Stop('TARGET_NOT_VISIBLE',owner='recognition')
+            loc = await self.audience_radio_label(entry)
         if entry.get('field'):
             binding=await self.verify_binding(entry['field'])
             owned=await self.browser.page.evaluate(r'''(s=>{
@@ -947,20 +1264,112 @@ class V2BrowserTools:
             if owned is not True:raise V2Stop('CURRENT_FIELD_OWNERSHIP_UNPROVEN',owner='recognition')
         return entry,loc
 
+    async def audience_radio_label(self, entry):
+        from modules.whatsapp.contract import V2Stop
+        from modules.whatsapp.page1_transition import CAMPAIGN_DOM
+        from modules.whatsapp.observation import V2_LABEL_HELPERS
+
+        settings = {'input': entry['selector'], 'scope': self.ui.stage_selectors['audience'],
+                    'value': self.payload.audience_type}
+        expression = (r'''(s=>{''' + V2_LABEL_HELPERS + CAMPAIGN_DOM + r'''
+          const input=one(s.input), scope=one(s.scope);
+          if(input?.type!=='radio'||!scope?.contains(input)||input.disabled||input.matches(':disabled'))return null;
+          const labels=[...input.labels].filter(e=>scope.contains(e)&&actionable(e)&&e.control===input&&
+            e.innerText.replace(/\s+/g,' ').trim()===s.value&&!e.querySelector('a,button,select,textarea')&&
+            [...e.querySelectorAll('input')].every(n=>n===input));
+          return labels.length===1?cssPath(labels[0]):null;
+        })(SETTINGS)''').replace('SETTINGS', json.dumps(settings))
+        selector = await self.browser.page.evaluate(expression)
+        if not selector:
+            self.browser.trace.agent_event('campaign_audience_radio_label', role='observer',
+                                           status='EXACT_ASSOCIATED_VISIBLE_LABEL_NOT_UNIQUE')
+            raise V2Stop('AUDIENCE_RADIO_VISIBLE_LABEL_NOT_BOUND', owner='recognition')
+        identity = await observed_node(self.browser, selector)
+        target = await stagehand_locator(self.browser, selector, identity)
+        if (not await target.is_visible(timeout=2000)
+                or await self.browser.page.evaluate(expression) != selector
+                or await observed_node(self.browser, entry['selector']) != entry['identity']):
+            raise V2Stop('AUDIENCE_RADIO_LABEL_BINDING_CHANGED', owner='recognition')
+        self.browser.trace.agent_event('campaign_audience_radio_label', role='observer', status='BOUND')
+        return target
+
     async def authorize_write(self):
         from modules.whatsapp.contract import V2Stop
-        if self.read_only or not self.start_state_verified or not self.authorization.edits:
+        if self.read_only or not self.authorization.edits:
             raise V2Stop('READ_ONLY_DISCOVERY_NO_CAMPAIGN_WRITE',owner='authorization')
-        self.ui.require_record()
-        before=await self.protect()
-        status=safety_diagnostic(await read_safety_snapshot(self.browser,include_inventory=True))
-        if status['code'] is not None:raise V2Stop('WRITE_SECURITY_SCOPE_NOT_CERTIFIED',owner='authorization',unsafe=True)
-        if await self.protect()!=before:raise V2Stop('WRITE_DOCUMENT_CHANGED',owner='browser',unsafe=True)
+        if self.authorization.manual_form_test:
+            operator_binding = getattr(self, 'operator_setup_binding', None)
+            operator_approved = (operator_binding is not None and self.browser.setup_binding is operator_binding
+                                 and getattr(self, 'operator_approved_setup_document', None) is not None
+                                 and getattr(self, 'operator_approved_payload', None) is self.payload)
+            if not operator_approved and getattr(self, 'manual_authentication_verified', False) is not True:
+                raise V2Stop('MANUAL_SETUP_REQUIRES_VERIFIED_LOGIN', owner='authorization', unsafe=True)
+            later_stage = (self.stage in {'audience', 'content'} and operator_approved and
+                           getattr(self, 'campaign_verified_stage', None) == self.stage)
+            if self.authorization.persistence or (self.stage != 'setup' and not later_stage):
+                raise V2Stop('MANUAL_FORM_TEST_SETUP_ONLY',owner='authorization')
+            if later_stage:
+                from modules.whatsapp.page1_transition import verify_active_campaign_stage
+                await verify_active_campaign_stage(self, self.stage)
+        else:
+            if not self.start_state_verified:
+                raise V2Stop('READ_ONLY_DISCOVERY_NO_CAMPAIGN_WRITE',owner='authorization')
+            self.ui.require_record()
+        await self.check_write_scope(require_setup_route=self.authorization.manual_form_test and self.stage=='setup')
+        await self.install_guard()
+
+    async def check_write_scope(self, *, require_setup_route, preflight=False, expected_document=None):
+        from modules.whatsapp.contract import V2Stop
+
+        before = await self.protect()
+        if require_setup_route and (getattr(self, '_last_protected_route', None)
+                                    or {}).get('fragment_class') != 'SETUP':
+            raise V2Stop('SETUP_ROUTE_NOT_READY', owner='recognition')
+        guard = getattr(self.browser, 'guard', None)
+        document = {}
+        if isinstance(before, tuple) and len(before) == 6:
+            target, session, generation, document_generation, _, _ = before
+            document = {'target_alias': getattr(guard, 'target_aliases', {}).get(target),
+                        'session_alias': getattr(guard, 'session_aliases', {}).get(session),
+                        'generation': generation, 'document_generation': document_generation}
+        if expected_document is not None and before != expected_document:
+            self.browser.trace.agent_event('setup_write_security_gate', role='controller', preflight=True,
+                status='FAILED', code='WRITE_DOCUMENT_CHANGED', failed_predicates=['current_setup_document'], **document)
+            print('SETUP_WRITE_PREFLIGHT FAILED WRITE_DOCUMENT_CHANGED current_setup_document', flush=True)
+            raise V2Stop('WRITE_DOCUMENT_CHANGED', owner='browser', unsafe=True)
+        scoped = getattr(self, 'operator_setup_binding', None) is not None
+        # protect() already verifies the current owned document, exact URL and
+        # security negatives. resolve() proves control identity and ownership for
+        # each operation. The operator-confirmed path needs no closed-root inventory.
+        status = None if scoped else safety_diagnostic(await read_safety_snapshot(self.browser, include_inventory=True))
+        if status is not None and status['code'] is not None:
+            self.browser.trace.agent_event('setup_write_security_gate', role='controller',
+                                           preflight=preflight, status='FAILED', **document, **status)
+            if preflight:
+                print('SETUP_WRITE_PREFLIGHT FAILED ' + json.dumps({
+                    **document, 'code': status['code'], 'failed_predicates': status['failed_predicates'],
+                    'scope_reason_counts': status['scope_reason_counts'],
+                }), flush=True)
+            raise V2Stop('WRITE_SECURITY_SCOPE_NOT_CERTIFIED', owner='authorization', unsafe=True)
+        if await self.protect() != before:
+            if preflight:
+                self.browser.trace.agent_event('setup_write_security_gate', role='controller', preflight=True,
+                    status='FAILED', code='WRITE_DOCUMENT_CHANGED', failed_predicates=['current_setup_document'], **document)
+                print('SETUP_WRITE_PREFLIGHT FAILED WRITE_DOCUMENT_CHANGED current_setup_document', flush=True)
+            raise V2Stop('WRITE_DOCUMENT_CHANGED', owner='browser', unsafe=True)
+        if preflight:
+            checked = {**document, 'scope': 'BOUND_SETUP_DOCUMENT' if scoped else 'FULL_SECURITY_INVENTORY'}
+            self.browser.trace.agent_event('setup_write_security_gate', role='controller',
+                                           preflight=True, status='PASSED', **checked)
+            print('SETUP_WRITE_PREFLIGHT PASSED ' + json.dumps(checked), flush=True)
+        return before
 
     async def screenshot(self):
         import struct
         from time import monotonic
         from modules.whatsapp.contract import V2Stop
+        if getattr(self,'diagnostic_mode',False):
+            raise V2Stop('READONLY_DIAGNOSTIC_SCREENSHOT_NOT_AUTHORIZED',owner='authorization')
         if not self.authorization.vision or not self.ui.visual_scope_selector or not self.ui.stage_selectors.get(self.stage):
             raise V2Stop('REVIEWED_VISUAL_SCOPE_AND_VISION_PERMISSION_REQUIRED',owner='authorization')
         document=await self.protect()
@@ -987,6 +1396,7 @@ class V2BrowserTools:
     async def records(self,*,on_login=False):
         """Independent reviewed GET, reduced in-page; never export response bodies."""
         from modules.whatsapp.contract import V2Stop
+        if getattr(self,'diagnostic_mode',False):raise V2Stop('READONLY_DIAGNOSTIC_NO_CAMPAIGN_RECORD_ACCESS',owner='authorization')
         self.ui.require_record()
         async def binding():
             if not on_login:return await self.protect()
@@ -1022,6 +1432,9 @@ class V2BrowserTools:
         return result
 
     def write_journal(self,action,status):
+        if getattr(self,'diagnostic_mode',False):
+            from modules.whatsapp.contract import V2Stop
+            raise V2Stop('READONLY_DIAGNOSTIC_NO_PERSISTENCE',owner='authorization')
         import hashlib
         from pathlib import Path
         from app.config import ROOT
@@ -1038,6 +1451,12 @@ class V2BrowserTools:
 
     async def advance(self):
         """Record controller persistence calls, including failures before/after click."""
+        if getattr(self,'diagnostic_mode',False):
+            from modules.whatsapp.contract import V2Stop
+            raise V2Stop('READONLY_DIAGNOSTIC_NO_PERSISTENCE',owner='authorization')
+        if getattr(getattr(self,'authorization',None),'manual_form_test',False):
+            from modules.whatsapp.contract import V2Stop
+            raise V2Stop('MANUAL_FORM_TEST_PERSISTENCE_FORBIDDEN',owner='authorization')
         started=monotonic();result=None;self.controller_attempted=False
         event={'id':str(len(self.events)),'stage':self.stage,'action':'advance','field':None,
             'method':'controller','preparation':'VERIFIED_STAGE','ok':False,'attempted':False}
@@ -1062,6 +1481,7 @@ class V2BrowserTools:
         self.ui.require_persistence(self.stage)
         self.payload.check_schedule()
         await self.authorize_write()
+        if not self.next_allowed:raise V2Stop('OBSERVER_STAGE_CERTIFICATE_REQUIRED',owner='authorization')
         selector=self.ui.preview_selector if self.stage=='schedule' else self.ui.next_selectors[self.stage]
         document=await self.protect();identity=await observed_node(self.browser,selector)
         locator=await stagehand_locator(self.browser,selector,identity)
@@ -1083,12 +1503,13 @@ class V2BrowserTools:
         if ' '.join(text.casefold().split()) not in accepted:raise V2Stop('PERSISTENCE_CONTROL_LABEL_NOT_EXACT',owner='authorization',unsafe=True)
         if document!=await self.protect() or identity!=await observed_node(self.browser,selector):
             raise V2Stop('ADVANCE_TARGET_CHANGED',owner='browser',unsafe=True)
+        if not self.next_allowed:raise V2Stop('OBSERVER_STAGE_CERTIFICATE_REQUIRED',owner='authorization')
         self.write_journal('SAVE_AND_PREVIEW' if self.stage=='schedule' else 'NEXT_STEP','PENDING')
         self.pending_write=True;self.next_allowed=False
         await self.browser.page.evaluate('window.__netcoreV2Advance=true')
         try:
             self.controller_attempted=True
-            await locator.click(timeout=3000)
+            await locator.click(timeout=getattr(self,'operation_timeout_ms',3000))
         finally:await self.browser.page.evaluate('window.__netcoreV2Advance=false')
         # A click/toast/transition is never persistence proof. Only read-only checks follow.
         for attempt in range(3):
@@ -1105,6 +1526,7 @@ class V2BrowserTools:
     async def readonly_navigation_links(self,document):
         """Use the existing selector generator; expose opaque references only."""
         from modules.login.discovery import DOCUMENT_HELPERS
+        origin=self.origin if getattr(self,'diagnostic_mode',False) else self.ui.origin
         settings={'origins':sorted(self.browser.policy.origins),'account':''}
         expression='(settings=>{'+DOCUMENT_HELPERS+r'''
           return [...document.querySelectorAll('nav a[href],[role=navigation] a[href],header a[href]')].slice(0,32)
@@ -1117,7 +1539,10 @@ class V2BrowserTools:
         if not isinstance(links,list):return []
         current=await self.browser.page.url();public=[]
         for link in links:
-            try:destination=readonly_whatsapp_destination(current,link['href'],self.ui.origin)
+            approved=getattr(self,'operator_navigation_selector_sha256',None)
+            if approved is not None and hashlib.sha256(link.get('selector','').encode()).hexdigest()!=approved:
+                continue
+            try:destination=readonly_whatsapp_destination(current,link['href'],origin)
             except (KeyError,TypeError,ValueError,RuntimeError):continue
             if destination==current:continue
             identity=await observed_node(self.browser,link['selector']);reference=uuid4().hex
@@ -1129,37 +1554,54 @@ class V2BrowserTools:
     async def navigate_readonly(self,reference,event):
         from modules.whatsapp.contract import V2Stop
         if not self.read_only:raise V2Stop('READONLY_NAVIGATION_SCOPE_REQUIRED',owner='authorization')
+        diagnostic=getattr(self,'diagnostic_mode',False)
         entry=self.references.get(reference)
         if not entry or entry.get('part')!='navigation':raise V2Stop('OBSERVED_NAVIGATION_REFERENCE_REQUIRED',owner='authorization')
         if entry['document']!=await self.protect() or entry['identity']!=await observed_node(self.browser,entry['selector']):
             raise V2Stop('NAVIGATION_REFERENCE_STALE',owner='browser',unsafe=True)
         same=await self.browser.page.evaluate('(s=>{const e=document.querySelector(s.q);return !!e&&e.tagName==="A"&&e.href===s.href&&!e.onclick&&!e.hasAttribute("onclick")&&!e.hasAttribute("download")&&(!e.target||e.target==="_self")&&e.getClientRects().length>0&&/whatsapp/i.test(e.textContent||e.getAttribute("aria-label")||"")})('+json.dumps({'q':entry['selector'],'href':entry['href']})+')')
         if same is not True:raise V2Stop('NAVIGATION_LINK_CHANGED',owner='browser',unsafe=True)
-        source=await self.browser.page.url();destination=readonly_whatsapp_destination(source,entry['href'],self.ui.origin)
+        origin=self.origin if diagnostic else self.ui.origin
+        source=await self.browser.page.url();destination=readonly_whatsapp_destination(source,entry['href'],origin)
         event['attempted']=True
         await self.browser.navigate(destination)
         final=await self.browser.page.url()
-        try:readonly_whatsapp_destination(source,final,self.ui.origin)
+        try:readonly_whatsapp_destination(source,final,origin)
         except V2Stop:raise V2Stop('READONLY_NAVIGATION_REDIRECT_UNVERIFIED',owner='browser',unsafe=True) from None
-        await self.install_guard();await self.protect();self.references.clear()
+        if not diagnostic:await self.install_guard()
+        await self.protect();self.references.clear()
         self.browser.trace.agent_event('readonly_whatsapp_navigation',role='doer',status='ARRIVED_AND_PROTECTED',
             destination_sha256=__import__('hashlib').sha256(final.encode()).hexdigest())
         event['progress']=True
-        return await self.observe()
+        return await self.observe_diagnostic() if diagnostic else await self.observe()
 
     async def action(self,arguments):
-        from modules.whatsapp.contract import V2Action,V2DiscoveryAction,V2Stop,STAGE_FIELDS
+        from modules.whatsapp.contract import V2Stop, STAGE_FIELDS
         from modules.whatsapp.observer import deterministic_readback
         from time import monotonic
-        try:data=(V2DiscoveryAction if self.read_only else V2Action).model_validate(arguments)
-        except (ValueError,TypeError):
-            self.browser.trace.agent_event('browser_action_rejected',role='doer',tool='browser_action',
-                arguments=self.browser.trace.safe_tool_arguments('browser_action',arguments),
-                error='INVALID_BROWSER_ACTION_ARGUMENTS',browser_interaction=False)
-            return {'ok':False,'error':'INVALID_BROWSER_ACTION_ARGUMENTS','owner':'tool','retry_safe':True},None
+        diagnostic=getattr(self,'diagnostic_mode',False)
+        manual=getattr(getattr(self,'authorization',None),'manual_form_test',False)
+        try:
+            data = self.action_schema().model_validate(arguments)
+        except (ValueError, TypeError):
+            return self.reject_schema(arguments), None
+        if not diagnostic:
+            from modules.whatsapp.contract import V2_CAPABILITIES,validate_v2_capability
+            entry=getattr(self,'references',{}).get(data.reference)
+            if entry and data.action in V2_CAPABILITIES:
+                field=data.field or entry.get('field')
+                try:
+                    if field not in STAGE_FIELDS[self.stage] or data.field and data.field!=entry.get('field'):
+                        raise V2Stop('FIELD_REFERENCE_SCOPE_MISMATCH',owner='authorization')
+                    binding=self.binding(field)
+                    validate_v2_capability(data.action,binding.kind,entry.get('part'))
+                except V2Stop as error:
+                    self.browser.trace.agent_event('browser_action_rejected',role='doer',tool='browser_action',
+                        error=error.code,field=field,browser_interaction=False)
+                    return {'ok':False,'error':error.code,'owner':error.owner,'retry_safe':True},None
         image_data=None;result=None;started=monotonic()
         event={'id':str(len(self.events)),'stage':self.stage,'action':data.action,
-            'field':data.field,'method':'visual' if data.screenshot_id or data.action=='screenshot' else 'semantic',
+            'field':getattr(data,'field',None),'method':'visual' if getattr(data,'screenshot_id',None) or data.action=='screenshot' else 'semantic',
             'preparation':'DIRECT','attempted':False,'valid_approach':False,'ok':False,'progress':False,
             'arguments':self.browser.trace.safe_tool_arguments('browser_action',arguments),'evidence_refs':[]}
         call=self.browser.trace.agent_event('browser_action_started',role='doer',tool='browser_action',
@@ -1167,170 +1609,305 @@ class V2BrowserTools:
         self.events.append(event)
         async with self.lock:
             try:
-                await self.protect()
-                if self.pending_write:raise V2Stop('WRITE_UNCERTAIN_READ_ONLY_REQUIRED',owner='uncertain_write',unsafe=True)
-                if self.read_only and data.action not in {'observe','dom','screenshot','inspect','scroll','options','verify','navigate'}:
-                    raise V2Stop('READ_ONLY_DISCOVERY_NO_CAMPAIGN_WRITE',owner='authorization')
-                if data.action in {'observe','dom'}:result=await self.observe()
-                elif data.action=='screenshot':result,image_data=await self.screenshot()
-                elif data.action=='navigate':result=await self.navigate_readonly(data.reference,event)
-                else:
-                    entry,loc=await self.resolve(data.reference)
-                    field=data.field or entry.get('field')
-                    event['field']=field
-                    event['preparation']=self.preparations.get((self.stage,field),'DIRECT')
-                    event['approach']=':'.join((str(field),entry['part'],data.action,event['method'],event['preparation']))
-                    if data.field and (data.field not in STAGE_FIELDS[self.stage] or entry.get('field')!=data.field):raise V2Stop('FIELD_REFERENCE_SCOPE_MISMATCH',owner='authorization')
-                    from modules.whatsapp.contract import validate_v2_capability
-                    if data.action in {'click','type','search','select','options','verify'}:
-                        if field not in STAGE_FIELDS[self.stage]:raise V2Stop('CURRENT_STAGE_FIELD_REQUIRED',owner='authorization')
-                        validate_v2_capability(data.action,self.binding(field).kind,entry['part'])
-                    if data.action in {'inspect','options'}:
-                        result=await self.inspect_options(entry) if data.action=='options' else await self.observe()
-                    elif data.action=='verify':result=await deterministic_readback(self,[field])
-                    elif data.action=='scroll':
-                        before=await self.browser.page.evaluate('(q=>{const r=document.querySelector(q).getBoundingClientRect();return [scrollX,scrollY,r.x,r.y]})('+json.dumps(entry['selector'])+')')
-                        if data.delta_y is None:
-                            await self.browser.guard.send('DOM.scrollIntoViewIfNeeded',{'backendNodeId':entry['identity'][-1]},entry['identity'][1])
+                async with asyncio.timeout(getattr(self,'operation_timeout_ms',10000)/1000):
+                    if getattr(self, 'terminal', None):
+                        raise V2Stop(self.terminal, owner=getattr(self, 'terminal_owner', 'browser'),
+                                     unsafe=getattr(self, 'terminal_unsafe', True))
+                    await self.protect()
+                    if self.pending_write:raise V2Stop('WRITE_UNCERTAIN_READ_ONLY_REQUIRED',owner='uncertain_write',unsafe=True)
+                    if diagnostic:
+                        if data.action=='observe':result=await self.observe_diagnostic()
+                        elif data.action=='navigate':result=await self.navigate_readonly(data.reference,event)
                         else:
-                            import math
-                            if not math.isfinite(data.delta_y) or abs(data.delta_y)>1000:raise V2Stop('SCROLL_LIMIT')
-                            point=await self.browser.page.evaluate('(q=>{const r=document.querySelector(q).getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})('+json.dumps(entry['selector'])+')')
-                            await self.browser.page.scroll(point['x'],point['y'],0,data.delta_y)
-                        after=await self.browser.page.evaluate('(q=>{const r=document.querySelector(q).getBoundingClientRect();return [scrollX,scrollY,r.x,r.y]})('+json.dumps(entry['selector'])+')')
-                        event['progress']=before!=after
-                        if event['progress']:self.preparations[(self.stage,field)]='SCROLLED'
-                        result={'scrolled':event['progress']}
-                    else:
-                        if self.mutations>=1:raise V2Stop('TURN_MUTATION_LIMIT')
-                        if not field or field not in STAGE_FIELDS[self.stage] or entry.get('create'):raise V2Stop('UNAUTHORIZED_CONTROL',owner='authorization')
-                        if not self.authorization.edits or not entry['enabled']:raise V2Stop('CONTROL_NOT_ACTIONABLE',owner='authorization')
-                        await self.authorize_write()
+                            entry,loc=await self.resolve(data.reference)
+                            if data.action in {'inspect','readback'}:
+                                result=await self.diagnostic_control_state(data.reference,entry)
+                            elif data.action=='scroll':
+                                before=await self.browser.page.evaluate('(q=>{const r=document.querySelector(q).getBoundingClientRect();return [scrollX,scrollY,r.x,r.y]})('+json.dumps(entry['selector'])+')')
+                                if data.delta_y is None:
+                                    await self.browser.guard.send('DOM.scrollIntoViewIfNeeded',{'backendNodeId':entry['identity'][-1]},entry['identity'][1])
+                                else:
+                                    point=await self.browser.page.evaluate('(q=>{const r=document.querySelector(q).getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})('+json.dumps(entry['selector'])+')')
+                                    await self.browser.page.scroll(point['x'],point['y'],0,data.delta_y)
+                                after=await self.browser.page.evaluate('(q=>{const r=document.querySelector(q).getBoundingClientRect();return [scrollX,scrollY,r.x,r.y]})('+json.dumps(entry['selector'])+')')
+                                event['progress']=before!=after
+                                result={'scrolled':event['progress']}
+                            else:raise V2Stop('UNSUPPORTED_DIAGNOSTIC_ACTION',owner='authorization')
+                    elif data.action in {'observe','dom'}:
+                        method='dom' if data.action=='dom' else 'semantic'
+                        event.update(method=method,approach=method,valid_approach=True,attempted=True)
+                        result=await self.observe(strategy=method)
+                        unresolved=result.get('unresolved_fields',[])
+                        for missing in unresolved:
+                            self.failed_approaches.setdefault((self.stage,missing),set()).add('discovery:'+method)
+                        for field in result.get('field_evidence',[]):
+                            self.preparations[(self.stage,field)]='DOM' if method=='dom' else 'SEMANTIC'
+                            # Finding a control is progress in discovery, not proof
+                            # that a field has been filled or an option selected.
+                            prior=self.failed_approaches.get((self.stage,field),set())
+                            remaining={attempt for attempt in prior if not attempt.startswith('discovery:')}
+                            if remaining:self.failed_approaches[(self.stage,field)]=remaining
+                            else:self.failed_approaches.pop((self.stage,field),None)
+                        event['progress']=bool(result.get('field_evidence'))
+                        if unresolved:
+                            result={**result,'recognition_status':'PARTIAL' if event['progress'] else 'UNRESOLVED',
+                                'permitted_next_operations':['dom' if method=='semantic' else 'observe','wait','inspect'],
+                                'remaining_predicates':unresolved}
+                    elif not diagnostic and data.action=='wait':
+                        from modules.whatsapp.observation import wait_for_setup_change
+                        await wait_for_setup_change(self.browser)
+                        result=await self.observe()
+                    elif not diagnostic and data.action=='screenshot':result,image_data=await self.screenshot()
+                    elif not diagnostic and data.action=='navigate':result=await self.navigate_readonly(data.reference,event)
+                    elif not diagnostic:
                         entry,loc=await self.resolve(data.reference)
-                        current=await self.browser.page.evaluate('(q=>{const e=document.querySelector(q);return !!e&&!e.disabled&&!e.readOnly&&e.getAttribute("aria-disabled")!=="true"&&!e.closest("[inert]")})('+json.dumps(entry['selector'])+')')
-                        if current is not True:raise V2Stop('CONTROL_NOT_CURRENTLY_ENABLED',owner='recognition')
-                        if data.action=='click' and entry['part']!='control':raise V2Stop('USE_EXACT_OPTION_SELECTION',owner='authorization')
-                        if data.action=='click' and self.ui.fields[field].kind not in {'combobox','native_select'}:raise V2Stop('ONLY_OBSERVED_DROPDOWN_OPEN_ALLOWED',owner='authorization')
-                        if data.action=='select' and self.ui.fields[field].kind=='combobox':
-                            # A popup option that disappears on selection cannot
-                            # independently prove the resulting selected state.
-                            binding=self.ui.fields[field]
-                            persistent=await self.browser.page.evaluate(r'''(s=>{
-                              const one=q=>{if(!q)return null;const a=document.querySelectorAll(q);return a.length===1?a[0]:null};
-                              const c=one(s.control),e=one(s.selected),p=one(s.stage);
-                              if(!c||!e||!p||!p.contains(c)||!p.contains(e)||!e.getClientRects().length||getComputedStyle(e).visibility==='hidden'||
-                                e.matches('input,textarea,[role=searchbox],[role=option]'))return false;
-                              const ids=((c.getAttribute('aria-controls')||'')+' '+(c.getAttribute('aria-owns')||'')).split(/\s+/).filter(Boolean);
-                              return !ids.some(id=>document.getElementById(id)?.contains(e));
-                            })(SETTINGS)'''.replace('SETTINGS',json.dumps({'control':binding.selector,
-                                'selected':binding.selected_selector,'stage':self.ui.stage_selectors.get(self.stage)})))
-                            if persistent is not True:raise V2Stop('PERSISTENT_SELECTED_STATE_EVIDENCE_REQUIRED',owner='recognition')
-                        if data.action in {'type','search'}:
-                            binding=self.ui.fields[field]
-                            if data.action=='search' and entry['part']!='search':raise V2Stop('OBSERVED_SEARCH_REQUIRED')
-                            if data.action=='type' and binding.kind not in {'text','checkbox','datetime_split'}:raise V2Stop('FIELD_REQUIRES_SELECTION')
-                            if binding.kind=='text' and (entry['tag'] not in {'INPUT','TEXTAREA'} or entry['type'] in {'password','hidden','file','submit','button','checkbox','radio'}):raise V2Stop('TEXT_INPUT_KIND_NOT_SUPPORTED',owner='recognition')
-                            if binding.kind=='checkbox' and entry['type']!='checkbox':raise V2Stop('CHECKBOX_KIND_NOT_SUPPORTED',owner='recognition')
-                        failed=self.failed_approaches.setdefault((self.stage,field),set())
-                        if event['approach'] in failed:raise V2Stop('IDENTICAL_FAILED_APPROACH_USE_DIFFERENT_METHOD',owner='recognition')
-                        if data.action=='click' and self.ui.fields[field].kind=='native_select' and (self.stage,field) in self.native_open_attempts:
-                            raise V2Stop('NATIVE_OPEN_ALREADY_ATTEMPTED_INSPECT_OR_SELECT',owner='recognition')
-                        before_field=(await deterministic_readback(self,[field]))['fields'].get(field) if data.action in {'type','select'} else None
-                        before_search=await loc.input_value(timeout=2000) if data.action=='search' else None
-                        self.mutations+=1
-                        if data.screenshot_id:
-                            shot=self.images.get(data.screenshot_id)
-                            if not shot or monotonic()-shot['time']>8 or shot['document']!=await self.protect():raise V2Stop('STALE_SCREENSHOT',owner='recognition')
-                            import math
-                            if not all(math.isfinite(v) for v in (data.x,data.y)) or not (0<=data.x<shot['width'] and 0<=data.y<shot['height']):raise V2Stop('COORDINATES_OUT_OF_BOUNDS')
-                            geometry=shot['geometry']
-                            scroll=await self.browser.page.evaluate('({x:scrollX,y:scrollY})')
-                            if (scroll['x'],scroll['y'])!=(geometry['scrollX'],geometry['scrollY']):raise V2Stop('SCREENSHOT_SCROLL_CHANGED',owner='recognition')
-                            x=geometry['x']+data.x*geometry['width']/shot['width']
-                            y=geometry['y']+data.y*geometry['height']/shot['height']
-                            hit=await self.browser.page.evaluate('(s=>{const e=document.querySelector(s.q),h=document.elementFromPoint(s.x,s.y);return !!e&&(e===h||e.contains(h))})('+json.dumps({'q':entry['selector'],'x':x,'y':y})+')')
-                            if hit is not True:raise V2Stop('VISUAL_TARGET_NOT_CONFIRMED',owner='recognition')
-                            await self.resolve(data.reference)
-                            if monotonic()-shot['time']>8:raise V2Stop('STALE_SCREENSHOT',owner='recognition')
-                            event['valid_approach']=True;event['attempted']=True;await self.browser.page.click(x,y)
-                        elif data.action=='click':
-                            event['valid_approach']=True;event['attempted']=True;await loc.click(timeout=3000)
-                        if data.action=='click' and self.ui.fields[field].kind=='native_select':self.native_open_attempts.add((self.stage,field))
-                        if data.action=='click' and field=='waba':self.waba_opened=True
-                        if data.action in {'type','search'}:
-                            value=getattr(self.payload,field)
-                            if self.ui.fields[field].kind=='checkbox':
-                                if await loc.is_checked(timeout=2000)!=value:
-                                    event['valid_approach']=True;event['attempted']=True;await loc.click(timeout=3000)
-                            elif self.ui.fields[field].kind=='datetime_split':
-                                b=self.ui.fields[field];scheduled=self.payload.scheduled_local()
-                                if not b.date_selector or not b.time_selector:raise V2Stop('REVIEWED_DATE_TIME_CONTROLS_REQUIRED',owner='recognition')
-                                prepared=[]
-                                for selector,text in ((b.date_selector,scheduled.strftime(b.date_format)),(b.time_selector,scheduled.strftime(b.time_format))):
-                                    safe=await self.browser.page.evaluate('(s=>{const a=document.querySelectorAll(s.q),p=document.querySelectorAll(s.stage);return a.length===1&&p.length===1&&p[0].contains(a[0])&&a[0].tagName==="INPUT"&&["date","time","text"].includes(a[0].type)&&!a[0].disabled&&!a[0].readOnly&&a[0].getClientRects().length>0})('+json.dumps({'q':selector,'stage':self.ui.stage_selectors[self.stage]})+')')
-                                    if safe is not True:raise V2Stop('DATE_TIME_PART_NOT_ACTIONABLE',owner='recognition')
-                                    identity=await observed_node(self.browser,selector)
-                                    prepared.append((selector,text,identity))
-                                for selector,text,identity in prepared:
-                                    target=await stagehand_locator(self.browser,selector,identity)
-                                    event['valid_approach']=True;event['attempted']=True;await target.fill(text,timeout=3000)
-                            elif field=='campaign_name' and data.action=='type':
-                                from modules.whatsapp.browser_baseline import field_reference
-                                discovery=await self.baseline.discover()
-                                reference=field_reference(discovery,'campaign_name')
-                                try:await self.baseline.fill_campaign(reference,authorized=True)
-                                finally:
-                                    event['attempted']=self.baseline.write_attempted
-                                    event['valid_approach']=self.baseline.write_attempted
+                        field=data.field or entry.get('field')
+                        event['field']=field
+                        event['preparation']=self.preparations.get((self.stage,field),'DIRECT')
+                        if event['method']!='visual' and (event['preparation']=='DOM' or getattr(self,'observation_strategy',None)=='dom'):
+                            event['method']='dom'
+                        if (data.action == 'click' and entry['part'] == 'control' and not data.screenshot_id
+                                and getattr(self, 'operator_setup_binding', None) is not None
+                                and self.binding(field).kind in {'combobox', 'native_select'}):
+                            # Structural discovery changes how the control is
+                            # located, not how the widget receives its first click.
+                            prior = self.failed_approaches.get((self.stage, field), set())
+                            event['method'] = 'dom' if f'{field}:native' in prior else 'native'
+                        event['approach']=':'.join((str(field),event['method']))
+                        if data.field and (data.field not in STAGE_FIELDS[self.stage] or entry.get('field')!=data.field):raise V2Stop('FIELD_REFERENCE_SCOPE_MISMATCH',owner='authorization')
+                        from modules.whatsapp.contract import validate_v2_capability
+                        if data.action in {'click','type','search','select','options','verify'}:
+                            if field not in STAGE_FIELDS[self.stage]:raise V2Stop('CURRENT_STAGE_FIELD_REQUIRED',owner='authorization')
+                            validate_v2_capability(data.action,self.binding(field).kind,entry['part'])
+                        if data.action in {'inspect','options'}:
+                            result=await self.inspect_options(entry) if data.action=='options' else await self.control_state(data.reference,entry)
+                        elif data.action=='verify':result=await deterministic_readback(self,[field])
+                        elif data.action=='scroll':
+                            before=await self.browser.page.evaluate('(q=>{const r=document.querySelector(q).getBoundingClientRect();return [scrollX,scrollY,r.x,r.y]})('+json.dumps(entry['selector'])+')')
+                            if data.delta_y is None:
+                                await self.browser.guard.send('DOM.scrollIntoViewIfNeeded',{'backendNodeId':entry['identity'][-1]},entry['identity'][1])
                             else:
-                                if field=='schedule_datetime':value=self.payload.scheduled_local().strftime(self.ui.fields[field].datetime_format)
-                                event['valid_approach']=True;event['attempted']=True;await loc.fill(value,timeout=3000)
-                        elif data.action=='select':
-                            await self.select(entry,loc,field,event)
-                            if field=='waba':self.waba_selected=True
-                        elif data.action!='click':raise V2Stop('UNSUPPORTED_ACTION',owner='tool')
-                        self.images.clear()
-                        if data.action in {'type','select'}:
-                            await self.observe()
-                            result=await deterministic_readback(self,[field])
-                            if result['fields'].get(field) is not True:raise V2Stop('FIELD_WRITE_UNCERTAIN_NO_RETRY',owner='uncertain_write',unsafe=True)
-                            event['progress']=before_field is not True
-                        elif data.action=='search':
-                            if await loc.input_value(timeout=2000)!=getattr(self.payload,field):raise V2Stop('SEARCH_READBACK_FAILED',owner='recognition')
-                            event['progress']=before_search!=getattr(self.payload,field)
-                            self.preparations[(self.stage,field)]='SEARCHED_EXISTING'
-                            result={'search_text_verified':True,'selection_verified':False}
+                                import math
+                                if not math.isfinite(data.delta_y) or abs(data.delta_y)>1000:raise V2Stop('SCROLL_LIMIT')
+                                point=await self.browser.page.evaluate('(q=>{const r=document.querySelector(q).getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})('+json.dumps(entry['selector'])+')')
+                                await self.browser.page.scroll(point['x'],point['y'],0,data.delta_y)
+                            after=await self.browser.page.evaluate('(q=>{const r=document.querySelector(q).getBoundingClientRect();return [scrollX,scrollY,r.x,r.y]})('+json.dumps(entry['selector'])+')')
+                            event['progress']=before!=after
+                            if event['progress']:self.preparations[(self.stage,field)]='SCROLLED'
+                            result={'scrolled':event['progress']}
                         else:
-                            fresh=await self.observe()
-                            opened=any(c['field']==field and c['part']=='control' and c['expanded'] for c in fresh['controls'])
-                            options=any(c['field']==field and c['part']=='option' for c in fresh['controls'])
-                            event['progress']=(opened and not entry['expanded']) or (options and not entry['expanded'])
-                            if opened or options:self.preparations[(self.stage,field)]='DROPDOWN_OPENED'
-                            result={'interaction_returned':True,'dropdown_open_verified':opened or options,
-                                'selection_verified':False,'observation':fresh}
-                            if not (opened or options):
-                                if self.ui.fields[field].kind=='combobox':raise V2Stop('DROPDOWN_OPEN_NOT_VERIFIED',owner='recognition')
-                                result['native_popup_visibility']='UNAVAILABLE_USE_OPTIONS_AND_SELECT'
-                if event['progress'] and event.get('field'):
-                    self.failed_approaches.pop((self.stage,event['field']),None)
-                event['ok']=True
-                return {'ok':True,**result},image_data
+                            value_change = data.action in {'type', 'select'}
+                            if manual and getattr(self, 'human_assisted_setup', False) and field in STAGE_FIELDS['setup']:
+                                preceding = STAGE_FIELDS['setup'][:STAGE_FIELDS['setup'].index(field)]
+                                verified = self.last_independent_readback.get('fields', {})
+                                page1_field = getattr(self, 'page1_current_field', None)
+                                if page1_field is not None:
+                                    from modules.whatsapp.contract import PAGE1_SETUP_FIELDS
+                                    if field not in PAGE1_SETUP_FIELDS or field != page1_field:
+                                        raise V2Stop('PAGE1_CURRENT_FIELD_SCOPE_REQUIRED', owner='recognition')
+                                    preceding = {'business_number': ('campaign_name', 'waba'),
+                                                 'campaign_name': ()}.get(field, ('campaign_name',))
+                                tag_exhausted = (field == 'ga_tracking' and
+                                    getattr(self, 'operator_setup_binding', None) is not None and
+                                    len(self.failed_approaches.get(('setup', 'tag'), ())) >= 2)
+                                if any(verified.get(name) is not True and not (name == 'tag' and tag_exhausted)
+                                       for name in preceding):
+                                    raise V2Stop('VERIFY_PRECEDING_SETUP_FIELDS_FIRST', owner='recognition')
+                                if preceding and not any(
+                                    event.get('action') == 'type' and event.get('field') == 'campaign_name'
+                                    and event.get('attempted') is True and event.get('ok') is True
+                                    and event.get('verification', {}).get('actual_match') is True
+                                    for event in self.events):
+                                    raise V2Stop('WRITE_AND_VERIFY_CAMPAIGN_NAME_FIRST', owner='recognition')
+                            if self.mutations >= 1:
+                                raise V2Stop('TURN_MUTATION_LIMIT', owner='controller')
+                            if not field or field not in STAGE_FIELDS[self.stage] or entry.get('create'):raise V2Stop('UNAUTHORIZED_CONTROL',owner='authorization')
+                            if not self.authorization.edits or not entry['enabled']:raise V2Stop('CONTROL_NOT_ACTIONABLE',owner='authorization')
+                            await self.authorize_write()
+                            entry,loc=await self.resolve(data.reference)
+                            current=await self.browser.page.evaluate('(q=>{const e=document.querySelector(q);return !!e&&!e.disabled&&!e.readOnly&&!e.matches(":disabled")&&!e.closest("[inert],[aria-disabled=true]")})('+json.dumps(entry['selector'])+')')
+                            if current is not True:raise V2Stop('CONTROL_NOT_CURRENTLY_ENABLED',owner='recognition')
+                            if data.action=='click' and entry['part'] not in {'control','search'}:raise V2Stop('USE_EXACT_OPTION_SELECTION',owner='authorization')
+                            if data.action=='click' and (self.ui.fields[field].kind=='text' or entry['part']=='search') and (
+                                entry.get('tag') not in {'INPUT','TEXTAREA'} or entry.get('type') in {'password','hidden','file','submit','button','checkbox','radio'}):
+                                raise V2Stop('TEXT_INPUT_KIND_NOT_SUPPORTED',owner='recognition')
+                            campaign_picker = (getattr(self, 'campaign_verified_stage', None) == self.stage
+                                and field in {'include_audience', 'exclude_audience', 'template'})
+                            if (data.action=='select' and self.ui.fields[field].kind=='combobox'
+                                    and getattr(self, 'page1_current_field', None) != 'tag' and not campaign_picker):
+                                # A popup option that disappears on selection cannot
+                                # independently prove the resulting selected state.
+                                binding=self.ui.fields[field]
+                                persistent=await self.browser.page.evaluate(r'''(s=>{
+                                  const one=q=>{if(!q)return null;const a=document.querySelectorAll(q);return a.length===1?a[0]:null};
+                                  const c=one(s.control),e=one(s.selected),p=one(s.stage);
+                                  if(!c||!e||!p||!p.contains(c)||!p.contains(e)||!e.getClientRects().length||getComputedStyle(e).visibility==='hidden'||
+                                    e.isContentEditable||e.matches('input,textarea,[role=searchbox],[role=option]'))return false;
+                                  const ids=((c.getAttribute('aria-controls')||'')+' '+(c.getAttribute('aria-owns')||'')).split(/\s+/).filter(Boolean);
+                                  return !ids.some(id=>document.getElementById(id)?.contains(e));
+                                })(SETTINGS)'''.replace('SETTINGS',json.dumps({'control':binding.selector,
+                                    'selected':binding.selected_selector,'stage':self.ui.stage_selectors.get(self.stage)})))
+                                if persistent is not True:raise V2Stop('PERSISTENT_SELECTED_STATE_EVIDENCE_REQUIRED',owner='recognition')
+                            if data.action in {'type','search'}:
+                                binding=self.ui.fields[field]
+                                if data.action=='search' and (entry['part'] not in {'search','control'} or
+                                    entry.get('tag') not in {'INPUT','TEXTAREA'} or entry.get('type') in {'password','hidden','file','submit','button','checkbox','radio'}):
+                                    raise V2Stop('OBSERVED_SEARCH_REQUIRED')
+                                if data.action=='type' and binding.kind not in {'text','checkbox','datetime_split'}:raise V2Stop('FIELD_REQUIRES_SELECTION')
+                                if binding.kind=='text' and (entry['tag'] not in {'INPUT','TEXTAREA'} or entry['type'] in {'password','hidden','file','submit','button','checkbox','radio'}):raise V2Stop('TEXT_INPUT_KIND_NOT_SUPPORTED',owner='recognition')
+                                if binding.kind=='checkbox' and not (entry['type']=='checkbox' or entry['role']=='checkbox'
+                                    or field=='ga_tracking' and entry['role']=='switch' and entry['type']!='submit'):
+                                    raise V2Stop('CHECKBOX_KIND_NOT_SUPPORTED',owner='recognition')
+                            failed=self.failed_approaches.setdefault((self.stage,field),set())
+                            if manual and len(failed) >= 2:
+                                raise V2Stop('STUCK_TWO_APPROACHES_FAILED', owner='recognition')
+                            if event['approach'] in failed:raise V2Stop('IDENTICAL_FAILED_APPROACH_USE_DIFFERENT_METHOD',owner='recognition')
+                            if data.action=='click' and self.ui.fields[field].kind=='native_select' and (self.stage,field) in self.native_open_attempts:
+                                raise V2Stop('NATIVE_OPEN_ALREADY_ATTEMPTED_INSPECT_OR_SELECT',owner='recognition')
+                            before_field=(await deterministic_readback(self,[field]))['fields'].get(field) if data.action in {'type','select'} else None
+                            before_search=await loc.input_value(timeout=2000) if data.action=='search' else None
+                            if manual and value_change:
+                                # A pre-write match for this field cannot survive
+                                # an interrupted or unverified write.
+                                readback = getattr(self, 'last_independent_readback', {})
+                                fields = {key: value for key, value in readback.get('fields', {}).items()
+                                          if key != field}
+                                self.last_independent_readback = {**readback, 'fields': fields}
+                            if value_change or not manual:
+                                self.mutations += 1
+                            if data.screenshot_id:
+                                shot=self.images.get(data.screenshot_id)
+                                if not shot or monotonic()-shot['time']>8 or shot['document']!=await self.protect():raise V2Stop('STALE_SCREENSHOT',owner='recognition')
+                                import math
+                                if not all(math.isfinite(v) for v in (data.x,data.y)) or not (0<=data.x<shot['width'] and 0<=data.y<shot['height']):raise V2Stop('COORDINATES_OUT_OF_BOUNDS')
+                                geometry=shot['geometry']
+                                scroll=await self.browser.page.evaluate('({x:scrollX,y:scrollY})')
+                                if (scroll['x'],scroll['y'])!=(geometry['scrollX'],geometry['scrollY']):raise V2Stop('SCREENSHOT_SCROLL_CHANGED',owner='recognition')
+                                x=geometry['x']+data.x*geometry['width']/shot['width']
+                                y=geometry['y']+data.y*geometry['height']/shot['height']
+                                hit=await self.browser.page.evaluate('(s=>{const e=document.querySelector(s.q),h=document.elementFromPoint(s.x,s.y);return !!e&&(e===h||e.contains(h))})('+json.dumps({'q':entry['selector'],'x':x,'y':y})+')')
+                                if hit is not True:raise V2Stop('VISUAL_TARGET_NOT_CONFIRMED',owner='recognition')
+                                await self.resolve(data.reference)
+                                if monotonic()-shot['time']>8:raise V2Stop('STALE_SCREENSHOT',owner='recognition')
+                                event['valid_approach']=True;event['attempted']=True;await self.browser.page.click(x,y)
+                            elif data.action=='click':
+                                event['valid_approach']=True;event['attempted']=True
+                                if event['method']=='dom':
+                                    await loc.send_click_event(bubbles=True,cancelable=True,composed=True,
+                                        timeout=getattr(self,'operation_timeout_ms',3000))
+                                else:await loc.click(timeout=getattr(self,'operation_timeout_ms',3000))
+                            if data.action=='click' and self.ui.fields[field].kind=='native_select':self.native_open_attempts.add((self.stage,field))
+                            if data.action=='click' and field=='waba':self.waba_opened=True
+                            if data.action in {'type','search'}:
+                                value=getattr(self.payload,field)
+                                if self.ui.fields[field].kind=='checkbox':
+                                    checked=await self.browser.page.evaluate('(s=>{const e=document.querySelector(s.q);if(!e)return null;' +
+                                        'if(e.type==="checkbox")return e.checked;const role=e.getAttribute("role");' +
+                                        'if(role==="checkbox"||(s.ga&&role==="switch"&&e.type!=="submit"))' +
+                                        'return e.getAttribute("aria-checked")==="true"?true:e.getAttribute("aria-checked")==="false"?false:null;return null;})('+
+                                        json.dumps({'q': entry['selector'], 'ga': field == 'ga_tracking'})+')')
+                                    if type(checked) is not bool:raise V2Stop('CHECKBOX_STATE_UNVERIFIED',owner='recognition')
+                                    if checked!=value:
+                                        event['valid_approach']=True;event['attempted']=True;await loc.click(timeout=getattr(self,'operation_timeout_ms',3000))
+                                elif self.ui.fields[field].kind=='datetime_split':
+                                    b=self.ui.fields[field];scheduled=self.payload.scheduled_local()
+                                    if not b.date_selector or not b.time_selector:raise V2Stop('REVIEWED_DATE_TIME_CONTROLS_REQUIRED',owner='recognition')
+                                    prepared=[]
+                                    for selector,text in ((b.date_selector,scheduled.strftime(b.date_format)),(b.time_selector,scheduled.strftime(b.time_format))):
+                                        safe=await self.browser.page.evaluate('(s=>{const a=document.querySelectorAll(s.q),p=document.querySelectorAll(s.stage);return a.length===1&&p.length===1&&p[0].contains(a[0])&&a[0].tagName==="INPUT"&&["date","time","text"].includes(a[0].type)&&!a[0].disabled&&!a[0].readOnly&&a[0].getClientRects().length>0})('+json.dumps({'q':selector,'stage':self.ui.stage_selectors[self.stage]})+')')
+                                        if safe is not True:raise V2Stop('DATE_TIME_PART_NOT_ACTIONABLE',owner='recognition')
+                                        identity=await observed_node(self.browser,selector)
+                                        prepared.append((selector,text,identity))
+                                    for selector,text,identity in prepared:
+                                        target=await stagehand_locator(self.browser,selector,identity)
+                                        event['valid_approach']=True;event['attempted']=True;await target.fill(text,timeout=getattr(self,'operation_timeout_ms',3000))
+                                elif field=='campaign_name' and data.action=='type' and not self.authorization.manual_form_test:
+                                    from modules.whatsapp.browser_baseline import field_reference
+                                    discovery=await self.baseline.discover()
+                                    reference=field_reference(discovery,'campaign_name')
+                                    try:await self.baseline.fill_campaign(reference,authorized=True)
+                                    finally:
+                                        event['attempted']=self.baseline.write_attempted
+                                        event['valid_approach']=self.baseline.write_attempted
+                                elif (data.action == 'search' and field == 'tag' and
+                                      getattr(self, 'page1_current_field', None) == 'tag' and before_search == value):
+                                    pass  # The verified Page 1 picker search already matches.
+                                else:
+                                    if field=='schedule_datetime':value=self.payload.scheduled_local().strftime(self.ui.fields[field].datetime_format)
+                                    event['valid_approach']=True;event['attempted']=True;await loc.fill(value,timeout=getattr(self,'operation_timeout_ms',3000))
+                            elif data.action=='select':
+                                await self.select(entry,loc,field,event)
+                                if field=='waba':self.waba_selected=True
+                            elif data.action!='click':raise V2Stop('UNSUPPORTED_ACTION',owner='tool')
+                            self.images.clear()
+                            if data.action in {'type','select'}:
+                                current_observation = await self.observe()
+                                result=await deterministic_readback(self,[field])
+                                if result['fields'].get(field) is not True:raise V2Stop('FIELD_WRITE_UNCERTAIN_NO_RETRY',owner='uncertain_write',unsafe=True)
+                                event['progress']=before_field is not True
+                                if manual:
+                                    result['observation'] = current_observation
+                            elif data.action=='search':
+                                if await loc.input_value(timeout=2000)!=getattr(self.payload,field):raise V2Stop('SEARCH_READBACK_FAILED',owner='recognition')
+                                event['progress']=before_search!=getattr(self.payload,field)
+                                self.preparations[(self.stage,field)]='SEARCHED_EXISTING'
+                                result={'search_text_verified':True,'selection_verified':False}
+                            elif data.action=='click' and (self.ui.fields[field].kind=='text' or entry['part']=='search'):
+                                focused=await self.browser.page.evaluate('(q=>document.activeElement===document.querySelector(q))('+json.dumps(entry['selector'])+')')
+                                result={'focused':focused is True,'selection_verified':False}
+                                if not focused:raise V2Stop('INPUT_FOCUS_NOT_VERIFIED',owner='recognition')
+                            else:
+                                fresh=await self.observe()
+                                opened=any(c['field']==field and c['part']=='control' and c['expanded'] for c in fresh['controls'])
+                                options=any(c['field']==field and c['part']=='option' for c in fresh['controls'])
+                                event['progress']=(opened and not entry['expanded']) or (options and not entry['expanded'])
+                                if opened or options:self.preparations[(self.stage,field)]='DROPDOWN_OPENED'
+                                result={'interaction_returned':True,'dropdown_open_verified':opened or options,
+                                    'selection_verified':False,'observation':fresh}
+                                if not (opened or options):
+                                    if self.ui.fields[field].kind=='combobox':raise V2Stop('DROPDOWN_OPEN_NOT_VERIFIED',owner='recognition')
+                                    result['native_popup_visibility']='UNAVAILABLE_USE_OPTIONS_AND_SELECT'
+                    if (event.get('field') and data.action in {'type', 'select', 'verify'}
+                            and result.get('fields', {}).get(event['field']) is True):
+                        self.failed_approaches.pop((self.stage,event['field']),None)
+                    event['ok']=True
+                    return {'ok':True,**result},image_data
             except asyncio.CancelledError:
                 self.terminal='INTERRUPTED_WRITE_NO_RETRY' if event['attempted'] else 'CANCELLED'
-                event.update(error=self.terminal,unsafe=event['attempted'],owner='controller');raise
+                self.terminal_owner = 'uncertain_write' if event['attempted'] else 'controller'
+                self.terminal_unsafe = event['attempted']
+                event.update(error=self.terminal,unsafe=self.terminal_unsafe,owner=self.terminal_owner);raise
             except Exception as error:
                 defect=isinstance(error,(TypeError,AttributeError,KeyError,NameError,NotImplementedError))
-                code='CODE_FIX_REQUIRED' if defect else error.code if isinstance(error,V2Stop) else 'BROWSER_OPERATION_FAILED'
-                unsafe=(isinstance(error,V2Stop) and error.unsafe) or (event['attempted'] and data.action in {'type','select','advance'})
-                owner='tool' if defect else error.owner if isinstance(error,V2Stop) else 'browser'
-                if unsafe or defect or owner in {'authorization','browser','authentication'}:self.terminal=code
+                import re
+                raw_code=getattr(error,'code',None)
+                code='CODE_FIX_REQUIRED' if defect else raw_code if isinstance(raw_code,str) and re.fullmatch(r'[A-Z][A-Z0-9_]{0,79}',raw_code) else 'BROWSER_OPERATION_TIMEOUT' if isinstance(error,TimeoutError) else 'BROWSER_OPERATION_FAILED'
+                unsafe=bool(getattr(error,'unsafe',False)) or (event['attempted'] and data.action in {'type','select','advance'})
+                owner='tool' if defect else getattr(error,'owner','browser')
+                if unsafe or defect or owner in {'authorization','browser','authentication'}:
+                    self.terminal=code;self.terminal_owner=owner;self.terminal_unsafe=unsafe
                 event.update(error=code,owner=owner,unsafe=unsafe)
+                if getattr(error,'budget_kind',None):
+                    event.update(budget_kind=error.budget_kind,actions_used=error.actions_used,actions_limit=error.actions_limit)
                 if event['valid_approach'] and not unsafe and not self.terminal and code!='IDENTICAL_FAILED_APPROACH_USE_DIFFERENT_METHOD':
                     self.failed_approaches.setdefault((self.stage,event['field']),set()).add(event['approach'])
                 result={'ok':False,'error':code,'owner':owner,'terminal':bool(self.terminal),'retry_safe':not self.terminal}
                 return result,None
             finally:
                 event['duration_ms']=round((monotonic()-started)*1000,3)
+                event['remaining_browser_actions']=max(0,self.browser.config.max_actions-self.browser.trace.actions) if hasattr(self.browser,'config') and hasattr(self.browser.trace,'actions') else None
+                inference=getattr(self,'inference_budget',None);permissions=getattr(self,'permissions',None)
+                event['remaining_execution_budget']={
+                    'browser_actions':event['remaining_browser_actions'],
+                    'session_seconds':max(0,round(self.session_deadline-monotonic(),3)) if hasattr(self,'session_deadline') else None,
+                    'model_requests':max(0,inference.max_requests-inference.requests) if inference else None,
+                    'doer_tool_calls':max(0,permissions.max_tool_calls-permissions.tool_calls) if permissions else None,
+                    'doer_turns':getattr(self,'turns_remaining',None),
+                    'browser_operation_timeout_ms':getattr(self,'operation_timeout_ms',10000),
+                }
+                field=event.get('field')
+                if field and result and isinstance(result.get('fields'),dict):
+                    event['verification']={'expected_match':True,'actual_match':result['fields'].get(field)}
                 from datetime import datetime,timezone
                 # Full structural observations have their own evidence event. Keep
                 # model/Teacher action history bounded and link to that evidence.
@@ -1366,33 +1943,178 @@ class V2BrowserTools:
         value=getattr(self.payload,field);binding=self.ui.fields[field]
         if field=='waba' and not self.waba_opened:raise V2Stop('EXPLICIT_WABA_OPEN_REQUIRED',owner='recognition')
         if binding.kind=='radio':
-            exact=await self.browser.page.evaluate('(s=>{const e=document.querySelector(s.q);return e?.type==="radio"&&(e.value===s.v||e.labels?.[0]?.textContent.trim()===s.v)})('+json.dumps({'q':binding.selector,'v':value})+')')
+            exact=await self.browser.page.evaluate('(s=>{const e=document.querySelector(s.q);if(!e)return false;'+
+                'const label=e.getAttribute("aria-label")||[...(e.labels||[])].map(n=>n.textContent).join(" ")||'+
+                '(e.getAttribute("aria-labelledby")||"").split(/\\s+/).map(id=>document.getElementById(id)?.textContent||"").join(" ")||e.textContent||"";'+
+                'return (e.type==="radio"||e.getAttribute("role")==="radio")&&(e.value===s.v||label.replace(/\\s+/g," ").trim()===s.v);})('+
+                json.dumps({'q':entry['selector'],'v':value})+')')
             if exact is not True:raise V2Stop('RADIO_OPTION_NOT_EXACT',owner='recognition')
             event['valid_approach']=True
-            if not await loc.is_checked(timeout=2000):event['attempted']=True;await loc.click(timeout=3000)
+            checked=await self.browser.page.evaluate('(q=>{const e=document.querySelector(q);if(!e)return null;' +
+                'if(e.type==="radio")return e.checked;if(e.getAttribute("role")==="radio")' +
+                'return e.getAttribute("aria-checked")==="true"?true:e.getAttribute("aria-checked")==="false"?false:null;return null;})('+
+                json.dumps(entry['selector'])+')')
+            if type(checked) is not bool:raise V2Stop('RADIO_STATE_UNVERIFIED',owner='recognition')
+            if not checked:event['attempted']=True;await loc.click(timeout=getattr(self,'operation_timeout_ms',3000))
         elif binding.kind=='native_select':
             # Resolve the option's actual value from this current observed select.
             options=await self.browser.page.evaluate('(s=>{const e=document.querySelector(s.q);return e?.tagName==="SELECT"?'+
                 '[...e.options].filter(o=>!o.disabled&&(o.textContent.trim()===s.v||o.value===s.v)).map(o=>o.value):[]})('+json.dumps({'q':binding.selector,'v':value})+')')
-            if len(options)!=1:raise V2Stop('EXACT_EXISTING_OPTION_UNAVAILABLE',owner='recognition')
             event['valid_approach']=True
-            event['attempted']=True;await loc.select_option([options[0]],timeout=3000)
+            if len(options)!=1:raise V2Stop('EXACT_EXISTING_OPTION_UNAVAILABLE',owner='recognition')
+            event['attempted']=True;await loc.select_option([options[0]],timeout=getattr(self,'operation_timeout_ms',3000))
         elif binding.kind=='combobox' and entry['part']=='option' and entry['exact'] and not entry['create']:
             if not binding.option_selector:raise V2Stop('REVIEWED_EXISTING_OPTION_EVIDENCE_REQUIRED',owner='recognition')
-            permitted=await self.browser.page.evaluate('(s=>{const e=document.querySelector(s.q);return !!e&&e.matches(s.options)&&!e.hasAttribute("data-create")&&e.getAttribute("data-select2-tag")!=="true"&&e.textContent.trim()===s.value})('+json.dumps({'q':entry['selector'],'options':binding.option_selector,'value':value})+')')
-            if permitted is not True:raise V2Stop('EXACT_EXISTING_OPTION_UNAVAILABLE',owner='recognition')
+            if field == 'tag' and getattr(self, 'page1_current_field', None) == 'tag':
+                from modules.whatsapp.observation import TAG_CHIP_HELPERS
+                expression = r'''(s=>{''' + TAG_CHIP_HELPERS + r'''
+                  const options=document.querySelectorAll(s.q);
+                  const e=options.length===1?options[0]:null;
+                  if(!e||!e.matches(s.options)||e.closest('[data-create],[data-select2-tag=true],[aria-disabled=true]'))
+                      return null;
+                  const controls=document.querySelectorAll(s.control);
+                  if(controls.length!==1)return null;
+                  const control=controls[0];
+                  const ids=((control.getAttribute('aria-controls')||'')+' '+(control.getAttribute('aria-owns')||''))
+                    .split(/\s+/).filter(Boolean);
+                  const rows=new Set(ids.flatMap(id=>[...document.getElementById(id)?.querySelectorAll(s.options)||[]]));
+                  const matches=[...rows].map(row=>({row,chip:chipParts(row,'+')}))
+                    .filter(item=>item.chip.label===s.value&&item.chip.action);
+                  if(matches.length!==1||matches[0].row!==e)return null;
+                  const {chip}=matches[0];
+                  if(chip.action===e)return s.q;
+                  const path=[];
+                  for(let n=chip.action;n&&n!==e;n=n.parentElement){
+                    const order=[...n.parentElement.children].indexOf(n)+1;
+                    path.unshift(':nth-child('+order+')');
+                  }
+                  const selector=s.q+' > '+path.join(' > ');
+                  return path.length&&document.querySelectorAll(selector).length===1&&
+                      document.querySelector(selector)===chip.action?selector:null;
+                })(SETTINGS)'''
+                settings = {'q': entry['selector'], 'options': binding.option_selector, 'value': value,
+                            'control': binding.selector}
+                selector = await self.browser.page.evaluate(expression.replace('SETTINGS', json.dumps(settings)))
+                if not isinstance(selector, str) or not selector:
+                    raise V2Stop('EXACT_EXISTING_TAG_ADD_CONTROL_NOT_BOUND', owner='recognition')
+                identity = await observed_node(self.browser, selector)
+                if await observed_node(self.browser, entry['selector']) != entry['identity']:
+                    raise V2Stop('TAG_OPTION_IDENTITY_CHANGED', owner='browser', unsafe=True)
+                target = await stagehand_locator(self.browser, selector, identity)
+                if await self.browser.page.evaluate(expression.replace('SETTINGS', json.dumps(settings))) != selector:
+                    raise V2Stop('EXACT_EXISTING_TAG_ADD_CONTROL_NOT_BOUND', owner='recognition')
+                event['valid_approach'] = event['attempted'] = True
+                await target.click(timeout=getattr(self, 'operation_timeout_ms', 3000))
+                return
+            if (getattr(self, 'campaign_verified_stage', None) == self.stage
+                    and field in {'include_audience', 'exclude_audience', 'template'}):
+                from modules.whatsapp.observation import CAMPAIGN_PICKER_HELPERS
+                expression = r'''(s=>{''' + CAMPAIGN_PICKER_HELPERS + r'''
+                  const c=document.querySelector(s.control), e=document.querySelector(s.option);
+                  if(!c||!e||campaignPickerOwners(s.stage)[s.field]!==c)return false;
+                  const ids=((c.getAttribute('aria-controls')||'')+' '+(c.getAttribute('aria-owns')||'')).split(/\s+/).filter(Boolean);
+                  const rows=new Set(ids.flatMap(id=>[...document.getElementById(id)?.querySelectorAll('[role=option]')||[]]));
+                  const matches=[...rows].filter(row=>campaignOptionExact(row,s.value));
+                  return matches.length===1&&matches[0]===e&&e.getAttribute('aria-selected')!=='true';
+                })(SETTINGS)'''
+                settings = {'control': binding.selector, 'option': entry['selector'], 'field': field,
+                            'stage': self.stage, 'value': value}
+                permitted = await self.browser.page.evaluate(expression.replace('SETTINGS', json.dumps(settings)))
+            else:
+                permitted=await self.browser.page.evaluate('(s=>{const e=document.querySelector(s.q);return !!e&&e.matches(s.options)&&!e.hasAttribute("data-create")&&e.getAttribute("data-select2-tag")!=="true"&&e.textContent.trim()===s.value})('+json.dumps({'q':entry['selector'],'options':binding.option_selector,'value':value})+')')
             event['valid_approach']=True
-            event['attempted']=True;await loc.click(timeout=3000)
+            if permitted is not True:raise V2Stop('EXACT_EXISTING_OPTION_UNAVAILABLE',owner='recognition')
+            event['attempted']=True;await loc.click(timeout=getattr(self,'operation_timeout_ms',3000))
         else:raise V2Stop('EXACT_EXISTING_OPTION_REQUIRED',owner='recognition')
+
+    def action_schema(self):
+        from modules.whatsapp.contract import (V2Action, V2DiagnosticAction, V2DiscoveryAction,
+            V2DiscoveryNoVisionAction, V2ManualAction, V2ManualNoVisionAction, V2SetupReadOnlyAction,
+            V2CampaignAudienceAction, V2CampaignContentAction)
+
+        if getattr(self, 'diagnostic_mode', False):
+            return V2DiagnosticAction
+        authorization = getattr(self, 'authorization', None)
+        vision = (getattr(authorization, 'vision', False) and
+                  bool(getattr(getattr(self, 'ui', None), 'visual_scope_selector', None)))
+        if self.read_only:
+            if getattr(self, 'human_assisted_setup', False):
+                return V2SetupReadOnlyAction
+            return V2DiscoveryAction if vision else V2DiscoveryNoVisionAction
+        if getattr(authorization, 'manual_form_test', False):
+            stage = getattr(self, 'stage', None)
+            if (getattr(self, 'operator_setup_binding', None) is not None and
+                    getattr(self, 'campaign_verified_stage', None) == stage):
+                if stage == 'audience':
+                    return V2CampaignAudienceAction
+                if stage == 'content':
+                    return V2CampaignContentAction
+            return V2ManualAction if vision else V2ManualNoVisionAction
+        return V2Action
+
+    def reject_schema(self, arguments):
+        from modules.whatsapp.contract import v2_schema_rejection
+
+        detail = v2_schema_rejection(self.action_schema(), arguments)
+        self.browser.trace.agent_event('browser_action_rejected', role='doer', tool='browser_action',
+            error='INVALID_BROWSER_ACTION_ARGUMENTS', browser_interaction=False, **detail)
+        return {'ok': False, 'error': 'INVALID_BROWSER_ACTION_ARGUMENTS', 'owner': 'tool',
+                'retry_safe': True, **detail}
+
+    @staticmethod
+    def compact_tool_observation(result):
+        # Full redacted observation remains in its own trace event. Keep all
+        # supported action references and drop repeated scan diagnostics.
+        if 'observation' in result:
+            result = {**result, 'observation': V2BrowserTools.compact_tool_observation(result['observation'])}
+        if 'controls' not in result:
+            return result
+        control_keys = ('field', 'part', 'reference', 'enabled', 'expanded', 'exact',
+                        'selected_exact', 'checked', 'create', 'role', 'tag', 'type')
+        controls = [{key: node[key] for key in control_keys if key in node}
+                    for node in result['controls'] if node.get('field') and not node.get('create')]
+        keys = ('ok', 'stage', 'stage_visible', 'field_evidence', 'unresolved_fields', 'recognition_status',
+                'permitted_next_operations', 'evidence_ref', 'truncated', 'pending_write', 'scoped_option_evidence')
+        return {**{key: result[key] for key in keys if key in result}, 'controls': controls}
 
     def registered_tools(self):
         from langchain_core.tools import StructuredTool
-        from modules.whatsapp.contract import V2Action,V2DiscoveryAction
+        from modules.whatsapp.contract import v2_action_arguments
+
+        def validation_error(error):
+            item = next((item for item in error.errors() if isinstance(item.get('input'), dict)), {})
+            return json.dumps(self.reject_schema(item.get('input', {})))
+
         async def invoke(**arguments):
+            # StructuredTool has already validated supplied fields, then expands
+            # omitted nullable defaults. Do not turn those into supplied fields
+            # during the deterministic action boundary's second validation.
+            arguments={key:value for key,value in arguments.items() if value is not None}
             result,raw_image=await self.action(arguments)
+            if getattr(self, 'human_assisted_setup', False):
+                result = self.compact_tool_observation(result)
+                field = getattr(self, 'page1_current_field', None)
+                if field is not None:
+                    for observation in (result, result.get('observation') or {}):
+                        if 'controls' in observation:
+                            observation['controls'] = [item for item in observation['controls'] if item.get('field') == field]
             content=[{'type':'text','text':json.dumps(result)}]
             if raw_image:content.append({'type':'image_url','image_url':{'url':'data:image/png;base64,'+raw_image}})
             return content,{'image_supplied':raw_image is not None}
+        diagnostic=getattr(self,'diagnostic_mode',False)
+        description=('Payload-free supervised diagnostic: observe, inspect/read back redacted current state, scroll, or navigate only with a fresh observed WhatsApp link reference. No screenshot, DOM dump, field, value, URL, write, campaign-record or persistence action is available.'
+            if diagnostic else
+            'Observe uses a deterministic Stagehand accessibility snapshot and semantic labels; dom freshly inspects structural DOM labels. Wait is bounded rendering observation. Inspect, scroll, options and verify use current references. Click focuses text/search controls or opens an owned dropdown; type applies fixed text/checkbox values; search uses the fixed approved value; select chooses an exact existing dropdown/radio option. Screenshots require separate reviewed vision scope. In read-only mode navigate uses an observed link reference. Next Step may be inspected; only a separately authorized controller can advance/save. Never supply values/selectors.')
+        schema = self.action_schema()
+        if getattr(self, 'human_assisted_setup', False):
+            description = ('Protected WhatsApp Setup. Observe semantic labels or use dom for structural labels. '
+                'Use fresh observed references only. Inspect takes reference only. '
+                'Use options for candidate options and verify for actual field readback. '
+                'The contract fixes all input values and excludes persistence.')
+        signature = '; '.join(action + '(' + ', '.join(
+            field if field in required else field + ' optional' for field in allowed) + ')'
+            for action, (required, allowed) in v2_action_arguments(schema).items())
+        description += ' Allowed action signatures: ' + signature + '. Omit unrelated arguments.'
         return [StructuredTool.from_function(coroutine=invoke,name='browser_action',
-            description='Observe/DOM, screenshot, inspect, scroll, options and verify. In read-only mode navigate accepts only an observed navigation reference, never a URL or field. Other modes allow owned dropdown interaction and fixed payload fields. Never supply values/selectors. Only the graph can advance/save.',
-            args_schema=V2DiscoveryAction if self.read_only else V2Action,response_format='content_and_artifact')]
+            description=description,args_schema=schema,response_format='content_and_artifact',
+            handle_validation_error=validation_error)]

@@ -41,11 +41,32 @@ class MeteredChatOpenAI(ChatOpenAI):
             'evidence_messages':tokens(evidence),'schema_and_tools':tokens(fmt)+tokens(payload.get('tools',[])),
             'other_message_history':tokens(other)}
         measured=sum(components.values());bound=measured+512
-        if self._role=='teacher' and (bound>self._input_cap or other or len(evidence)!=1 or payload.get('previous_response_id') or payload.get('conversation')):
-            raise EvidenceError('MODEL_BOUNDARY_CONTEXT_BUDGET_OR_HISTORY')
         cap=payload.get('max_output_tokens',self.max_tokens)
-        if not isinstance(cap,int) or cap<1:raise EvidenceError('MISSING_OUTPUT_LIMIT')
-        self._budget.reserve_tokens(bound,cap,role=self._role)
+        failures = []
+        if self._role == 'teacher':
+            if bound > self._input_cap:
+                failures.append('TEACHER_INPUT_BOUND_EXCEEDS_CAP')
+            if other:
+                failures.append('TEACHER_OTHER_HISTORY_PRESENT')
+            if len(evidence) != 1:
+                failures.append('TEACHER_REQUIRES_ONE_USER_MESSAGE')
+            if payload.get('previous_response_id') or payload.get('conversation'):
+                failures.append('TEACHER_CONVERSATION_CONTINUATION')
+        if not isinstance(cap, int) or cap < 1:
+            failures.append('MISSING_OUTPUT_LIMIT')
+        if failures:
+            self._trace.agent_event('model_boundary_rejected', role=self._role,
+                code=failures[0], failed_predicates=failures, components=components,
+                input_bound_with_margin=bound, input_limit=self._input_cap,
+                user_message_count=len(evidence), other_message_count=len(other))
+            raise EvidenceError(failures[0])
+        try:
+            self._budget.reserve_tokens(bound,cap,role=self._role)
+        except RuntimeError as error:
+            self._trace.agent_event('model_boundary_rejected', role=self._role,
+                code=str(error), components=components,
+                **self._budget.token_operands(bound, cap, role=self._role))
+            raise
         record={'role':self._role,'tokenizer':'o200k_base','attribution':'LOCAL_ESTIMATE_PROVIDER_TOTAL_SEPARATE',
             'components':components,'estimated_input_tokens':measured,'input_bound_with_margin':bound,
             'serialized_input_bytes':len(canonical(payload.get('input',[])).encode()),

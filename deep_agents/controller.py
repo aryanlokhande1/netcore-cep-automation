@@ -100,7 +100,7 @@ async def _execute_doer(browser,tools,task,model,budget,offline,skill_snapshot=N
     try:
         async with asyncio.timeout(login_timeout or browser.config.timeout_seconds):
             await browser.start()
-            if getattr(browser,'evidence_review',False):
+            if getattr(browser,'evidence_review',False) or getattr(browser, 'login_calibration', False):
                 try:
                     from browser.discovery import ReadOnlyDiscovery
                     browser.discovery=ReadOnlyDiscovery(browser)
@@ -297,7 +297,8 @@ async def run_synthetic(config,task=DEFAULT_TASK,scenario='valid',mode='offline'
 
 async def run_live(config,task=DEFAULT_TASK,authorized=False,api_request_budget=0,
                    extra_origins=(),hold_seconds=0,diagnostics=False,teacher_request_budget=2,
-                   strategy=None,history=None,learning=True,evidence_review=False,token_pool=None,review=True):
+                   strategy=None,history=None,learning=True,evidence_review=False,token_pool=None,review=True,
+                   *,login_calibration=False):
     from app.safety import authorize_live
     from modules.login.credentials import LocalCredentials,CredentialBroker
     from modules.login.evidence import EvidenceConfig
@@ -310,6 +311,9 @@ async def run_live(config,task=DEFAULT_TASK,authorized=False,api_request_budget=
         raise ConfigurationError('Disabled Teacher review requires learning disabled and zero Teacher budget')
     if review and not 1<=teacher_request_budget<api_request_budget:
         raise ConfigurationError('Reserve a separate Teacher budget within the per-run total')
+    if login_calibration and (review or learning or hold_seconds or diagnostics or evidence_review
+                              or extra_origins or config.evidence_file):
+        raise ConfigurationError('WhatsApp Login calibration requires the isolated Login-only mode.')
     if evidence_review and (not hold_seconds or not config.evidence_file):
         raise ConfigurationError('Evidence review requires an inspection hold and a configured evidence file')
     if hold_seconds:
@@ -343,7 +347,13 @@ async def run_live(config,task=DEFAULT_TASK,authorized=False,api_request_budget=
     tools.strategy=strategy
     if evidence_review:
         browser.evidence_review=True
-    result=await _execute_doer(browser,tools,task,doer_model,budget,False,snapshot,hold_seconds=hold_seconds,diagnostics=diagnostics)
+    if login_calibration:
+        from modules.whatsapp.login_calibration import collect_login_calibration
+        browser.login_calibration = True
+        result = await _execute_doer(browser, tools, task, doer_model, budget, False, snapshot,
+                                     after_login=collect_login_calibration)
+    else:
+        result=await _execute_doer(browser,tools,task,doer_model,budget,False,snapshot,hold_seconds=hold_seconds,diagnostics=diagnostics)
     result['review_previous_strategy']=strategy.model_dump()
     print('LIVE DOER COMPLETED: '+result['verification']+'; cleanup='+trace.cleanup_result,flush=True)
     result['rediscovery_used']=tools.recovery_used

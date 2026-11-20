@@ -9,6 +9,22 @@ from app.config import ROOT
 from app.state import Observation
 from browser.navigation_guard import NavigationGuard
 
+
+class BrowserBudgetExceeded(TimeoutError):
+    def __init__(self, budget_kind, *, actions_used, actions_limit):
+        codes = {
+            "ACTION_LIMIT": "BROWSER_ACTION_BUDGET_EXHAUSTED",
+            "SESSION_DEADLINE": "BROWSER_SESSION_DEADLINE_EXCEEDED",
+            "REVIEW_DEADLINE": "BROWSER_REVIEW_DEADLINE_EXCEEDED",
+        }
+        self.budget_kind = budget_kind
+        self.code = codes[budget_kind]
+        self.owner = "browser"
+        self.actions_used = actions_used
+        self.actions_limit = actions_limit
+        super().__init__(self.code)
+
+
 class StagehandClient:
     def __init__(self, config, policy, trace, fixture=False, evidence=None, live_permit=None):
         self.config, self.policy, self.trace = config, policy, trace
@@ -52,9 +68,23 @@ class StagehandClient:
         self.login_submissions += 1
 
     def budget(self):
-        expired=monotonic()>self.review_deadline if self.review_deadline is not None else monotonic()-self.started>self.config.timeout_seconds
-        if self.trace.actions >= self.config.max_actions or expired:
-            raise TimeoutError("Browser budget exhausted")
+        actions_used=self.trace.actions
+        actions_limit=self.config.max_actions
+        if actions_used>=actions_limit:
+            self.trace.lifecycle('BROWSER',{'state':'BROWSER_BUDGET_EXHAUSTED',
+                'budget_kind':'ACTION_LIMIT','actions_used':actions_used,'actions_limit':actions_limit})
+            raise BrowserBudgetExceeded('ACTION_LIMIT',
+                actions_used=actions_used,actions_limit=actions_limit)
+        if self.review_deadline is not None and monotonic()>self.review_deadline:
+            self.trace.lifecycle('BROWSER',{'state':'BROWSER_BUDGET_EXHAUSTED',
+                'budget_kind':'REVIEW_DEADLINE','actions_used':actions_used,'actions_limit':actions_limit})
+            raise BrowserBudgetExceeded('REVIEW_DEADLINE',
+                actions_used=actions_used,actions_limit=actions_limit)
+        if self.review_deadline is None and monotonic()-self.started>self.config.timeout_seconds:
+            self.trace.lifecycle('BROWSER',{'state':'BROWSER_BUDGET_EXHAUSTED',
+                'budget_kind':'SESSION_DEADLINE','actions_used':actions_used,'actions_limit':actions_limit})
+            raise BrowserBudgetExceeded('SESSION_DEADLINE',
+                actions_used=actions_used,actions_limit=actions_limit)
         if self.guard and self.guard.failed:
             raise PermissionError("Navigation guard failed closed")
         observable=getattr(self.guard,'primary_observable',None)
@@ -129,13 +159,21 @@ class StagehandClient:
         owner=self.guard.session_states.get(self.guard.primary_session)
         before=(owner.target,owner.session,owner.generation,owner.document_generation,
                 owner.frame_id,owner.loader_id) if owner else None
-        result=await self.page.evaluate(READINESS_DOM)
+        scan_context=(*before,url) if before else None
+        if getattr(self,'readiness_scan_context',None)!=scan_context:
+            self.readiness_scan_context=scan_context;self.readiness_scan_budget=512
+        scan_budget=getattr(self,'readiness_scan_budget',512)
+        result=await self.page.evaluate(READINESS_DOM.replace('const limit=512;',f'const limit={scan_budget};'))
         after=self.guard.session_states.get(self.guard.primary_session)
         identity=(after.target,after.session,after.generation,after.document_generation,
                   after.frame_id,after.loader_id) if after else None
         if before is None or before!=identity or url!=await self.page.url():
-            return {'context':None,'expected_host':False,'loading':True}
+            self.readiness_scan_context=None
+            return {'context':None,'expected_host':False,'loading':True,'scan_limited':True,
+                'unknown_reason':'READINESS_DOCUMENT_CHANGED'}
+        self.readiness_scan_budget=min(12000,scan_budget*2) if result.get('scan_limited') else scan_budget
         return {**result,'context':(*before,url),
+                'scan_budget':scan_budget,'next_scan_budget':self.readiness_scan_budget,
                 'expected_host':urlsplit(url).hostname==self.config.expected_host}
 
     async def wait_for_application_ready(self):
@@ -153,7 +191,13 @@ class StagehandClient:
                    'deadline_extended':extended,
                    'scan_limited':bool(sample.get('scan_limited')),
                    'shell_status':'OBSERVED' if sample.get('shell') else 'UNKNOWN' if sample.get('scan_limited') else 'NOT_OBSERVED',
-                   'security_scope':'NOT_CERTIFIED_BY_READINESS',**extra}
+                   'shell_landmarks':sample.get('shell_landmarks',[]),
+                   'security_scope':'NOT_CERTIFIED_BY_READINESS',
+                   'nodes_inspected':sample.get('nodes_inspected'),
+                   'pending_nodes':sample.get('pending_nodes'),
+                   'scan_budget':sample.get('scan_budget'),
+                   'next_scan_budget':sample.get('next_scan_budget'),
+                   'unknown_reason':sample.get('unknown_reason'),**extra}
             self.login_readiness=value
             if state!=last_state or extra.get('code'):
                 self.trace.lifecycle('LOGIN_READINESS',value);last_state=state
