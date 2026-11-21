@@ -300,8 +300,8 @@ class V2Payload(BaseModel):
     tag:StrictStr
     ga_tracking:StrictBool
     audience_type:Literal['Lists/Segments']
-    include_audience:StrictStr
-    exclude_audience:StrictStr
+    include_audience:StrictStr | tuple[StrictStr, ...]
+    exclude_audience:StrictStr | tuple[StrictStr, ...]
     template:StrictStr
     send_type:Literal['Send Later']
     schedule_datetime:StrictStr|None
@@ -317,9 +317,20 @@ class V2Payload(BaseModel):
         for value in self.model_dump().values():
             if isinstance(value,str) and (not value.strip() or len(value)>256 or any(ord(c)<32 for c in value)):
                 raise ValueError('Invalid task value')
+        for field in ('include_audience', 'exclude_audience'):
+            values = self.audience_values(field)
+            if (field == 'include_audience' and not values or len(values) > 15 or len(set(values)) != len(values)
+                    or any(not v.strip() or len(v) > 256 or any(ord(c) < 32 for c in v) for v in values)):
+                raise ValueError(f'Invalid {field}')
         try:ZoneInfo(self.timezone)
         except ZoneInfoNotFoundError:raise V2Stop('TIMEZONE_DATA_UNAVAILABLE',owner='environment') from None
         return self
+
+    def audience_values(self, field):
+        if field not in {'include_audience', 'exclude_audience'}:
+            raise ValueError('Unsupported Audience selection field')
+        value = getattr(self, field)
+        return (value,) if isinstance(value, str) else value
 
     def check_schedule(self):
         if self.schedule_datetime is None:raise V2Stop('SCHEDULE_DATETIME_REQUIRED',owner='authorization')

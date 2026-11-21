@@ -267,20 +267,21 @@ def _failure_report_lines(result):
     return lines
 
 
-def save_setup_evidence(directory, trace, tools, evaluation, failure):
+def save_setup_evidence(directory, trace, tools, evaluation, failure, *, screenshot=None):
     observation = tools.last_observation or {}
     record = {
         'status': 'CAPTURED' if observation or tools.events else 'NO_BROWSER_EVIDENCE',
         'observation': {key: observation[key] for key in (
             'stage', 'stage_visible', 'field_evidence', 'unresolved_fields', 'scope_basis',
-            'recognition_status', 'binding_failures', 'ga_row_evidence', 'evidence_ref') if key in observation},
+            'recognition_status', 'binding_failures', 'ga_row_evidence', 'evidence_ref',
+            'audience_picker_evidence', 'audience_section_evidence') if key in observation},
         'last_independent_readback': getattr(tools, 'last_independent_readback', {}),
         'attempts': [{key: event[key] for key in (
             'id', 'trace_ref', 'field', 'action', 'approach', 'attempted', 'valid_approach',
             'ok', 'error', 'owner', 'verification') if key in event} for event in tools.events[-24:]],
         'evaluation': evaluation,
         'failure': failure,
-        'screenshots': 'NOT_AUTHORIZED_IN_HUMAN_ASSISTED_MODE',
+        'screenshots': screenshot or 'NOT_AUTHORIZED_IN_HUMAN_ASSISTED_MODE',
     }
     name = 'setup-evidence-before-cleanup.json'
     _write_json(directory, name, record, trace)

@@ -22,7 +22,7 @@ def protected_route_status(url,*,expected_origin,expected_tenant=None,origin_per
         expected_tenant=expected_tenant if expected_tenant is not None else urlsplit(SETUP_URL).path.strip('/').split('/')[0]
         tenant=actual.path.strip('/').split('/')[0]
         fragment=setup_fragment_class(actual.fragment)
-        if campaign_stage in {'audience','content','schedule'} and campaign_step_route(url, campaign_stage):
+        if campaign_stage in {'audience','content','schedule','preview'} and campaign_step_route(url, campaign_stage):
             fragment=campaign_stage.upper()
         predicates={
             'url_credentials_absent':actual.username is None and actual.password is None,
@@ -61,6 +61,33 @@ def navigation_url_difference(left,right):
     a,b=urlsplit(left),urlsplit(right)
     def parts(u):return (u.scheme,u.hostname,u.port or (443 if u.scheme=='https' else 80),u.path,u.query,u.fragment)
     return [name for name,x,y in zip(('scheme','host','effective_port','path','query','fragment'),parts(a),parts(b)) if x!=y]
+
+
+def landing_route_parts(url):
+    """Keep route components and omit queries, fragments with parameters, and opaque segments."""
+    import re
+    try:
+        parsed = urlsplit(url)
+        def safe(segment):
+            return segment if re.fullmatch(r'[A-Za-z0-9_.~/-]{0,48}', segment) else '[redacted]'
+        return {'hostname': parsed.hostname,
+                'pathname': '/'.join(safe(segment) for segment in parsed.path.split('/')),
+                'fragment': safe(parsed.fragment)}
+    except (ValueError, TypeError, AttributeError):
+        return {'hostname': None, 'pathname': None, 'fragment': None}
+
+
+def same_tenant_landing_path(url, expected=SETUP_URL):
+    """Read-only settling is confined to the canonical HTTPS tenant admin tree."""
+    try:
+        facts = classify_setup_page(url, expected)['diagnostic']
+        boundary = urlsplit(expected).path.split('/campaign/', 1)[0]
+        path = urlsplit(url).path
+        return (facts['origin_match'] and facts['query_match'] and
+                (path == boundary or path.startswith(boundary + '/')) and
+                all(part not in {'.', '..'} for part in path.split('/')) and '%' not in path)
+    except (DestinationRejected, ValueError, TypeError):
+        return False
 
 
 def navigation_route_category(url,expected=SETUP_URL):
@@ -116,10 +143,19 @@ def classify_setup_page(url,expected=SETUP_URL,identity=None):
 
 
 def campaign_step_route(url, stage, expected=SETUP_URL):
-    if stage not in {'setup', 'audience', 'content', 'schedule'}:
+    if stage not in {'setup', 'audience', 'content', 'schedule', 'preview'}:
         return False
     try:
         parsed = urlsplit(url)
+        if stage == 'preview':
+            target = urlsplit(expected)
+            path_prefix, separator, _ = target.path.partition('/create/')
+            if (separator and parsed.path == path_prefix + '/preview' and not parsed.fragment
+                    and bool(parsed.query)):
+                # This actual Preview route is read-only and admitted only
+                # after the controller's separately approved draft click.
+                origin_probe = parsed._replace(path=target.path, query=target.query, fragment='').geturl()
+                return classify_setup_page(origin_probe, expected)['route_match']
         return (parsed.fragment == stage and
                 classify_setup_page(parsed._replace(fragment='').geturl(), expected)['route_match'])
     except (DestinationRejected, ValueError, TypeError):

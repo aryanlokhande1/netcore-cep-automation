@@ -70,6 +70,11 @@ class OperatorConsole:
             prompt=f'Click Next Step to submit WhatsApp {stage.title()} and open {destination.title()}? [y/N] ',
             receipt=f'{stage.title()} transition approval received')
 
+    async def confirm_save_draft_preview(self, timeout_seconds):
+        return await self._confirm_async(timeout_seconds, prompt_id='whatsapp_schedule_save_draft',
+            prompt='Save this campaign draft and open Preview? [y/N] ',
+            receipt='Draft save approval received')
+
     async def _confirm_async(self, timeout_seconds, *, prompt_id, prompt, receipt):
         if not self._custom_reader and os.name == 'nt':
             self._discard_queued_windows_keys()

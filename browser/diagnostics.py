@@ -115,7 +115,7 @@ class ScreenshotDiagnostics:
         self.browser=browser
         self.used=False
 
-    async def compare(self,dom,scope,enabled=False):
+    async def compare(self,dom,scope,enabled=False,*,campaign_tools=None):
         """Owned, read-only DOM/AX comparison; no names/text enter retained AX data.
 
         Live pixels are persisted only after complete stable redaction coverage.
@@ -131,15 +131,24 @@ class ScreenshotDiagnostics:
         from browser.discovery import login_page_context
         from app.safety import require_fixture_browser,require_live_browser
         def identity():
+            if campaign_tools is not None:
+                from browser.observed_control import protected_document
+                return protected_document(browser)
             g=browser.guard;o=g.session_states.get(g.primary_session)
             if not o or not g.primary_observable() or g.blocking_hosts:return None
             return (o.target,o.session,o.generation,o.document_generation,o.frame_id,o.loader_id)
         try:
             (require_fixture_browser if browser.fixture else require_live_browser)(browser)
-            before=identity();context=await login_page_context(browser)
-            result['page_context']=context
-            if not before or not context.get('primary_document_coherent') or not context.get('expected_host'):
-                result['status']='CONTEXT_UNAVAILABLE';return result
+            if campaign_tools is None:
+                before=identity();context=await login_page_context(browser)
+                result['page_context']=context
+                if not before or not context.get('primary_document_coherent') or not context.get('expected_host'):
+                    result['status']='CONTEXT_UNAVAILABLE';return result
+            else:
+                before=await campaign_tools.protect()
+                result['page_context']={'owned_campaign_document': bool(before)}
+                if before!=identity():
+                    result['status']='CONTEXT_UNAVAILABLE';return result
             origins=sorted(browser.policy.origins);session=before[1]
             samples={s['element_ref']:s for s in dom.get('dom_diagnostics',{}).get('semantic_samples',[])}
             async with asyncio.timeout(15):
@@ -208,7 +217,8 @@ class ScreenshotDiagnostics:
                         sx=safe.width/masks['width'];sy=safe.height/masks['height']
                         for x,y,width,height in masks['masks']:
                             draw.rectangle((math.floor(x*sx)-6,math.floor(y*sy)-6,math.ceil((x+width)*sx)+6,math.ceil((y+height)*sy)+6),fill='black')
-                        path=ROOT/'credentials'/'whatsapp-v2'/browser.trace.run_id/'rendered-ui-redacted.png'
+                        name='campaign-ui-redacted.png' if campaign_tools is not None else 'rendered-ui-redacted.png'
+                        path=ROOT/'credentials'/'whatsapp-v2'/browser.trace.run_id/name
                         path.parent.mkdir(parents=True,exist_ok=True);safe.save(path,format='PNG')
                         del raw,image,png
                         result.update(screenshot_status='CAPTURED_REDACTED',screenshot_reference=path.relative_to(ROOT).as_posix(),

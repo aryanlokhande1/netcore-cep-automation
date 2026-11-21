@@ -29,6 +29,36 @@ async def field_action(tools, field, action, reference):
     return result
 
 
+async def choose_settled_template(tools):
+    # The exact name can appear in the unfiltered result list. Wait for the
+    # search to replace it and verify a stable backend node before selection.
+    await asyncio.sleep(.8)
+    previous = None
+    for attempt in range(4):
+        await tools.observe()
+        choices = controls_for(tools, 'template', 'option')
+        evidence = (tools.last_observation or {}).get('scoped_option_evidence', {})
+        current = None
+        if len(choices) == 1 and has_verified_open(tools, 'template'):
+            reference = choices[0]['reference']
+            entry = tools.references.get(reference)
+            if entry:
+                current = (entry['identity'], evidence.get('visible_owned'))
+                if current == previous:
+                    tools.browser.trace.agent_event('content_template_results_settled', role='observer',
+                        status='UNIQUE_STABLE_RESULT', visible_option_count=evidence.get('visible_owned'),
+                        observations=attempt+1)
+                    return await field_action(tools, 'template', 'select', reference)
+        previous = current
+        if attempt < 3:
+            await asyncio.sleep(.4)
+    reason = ('CONTENT_TEMPLATE_RESULT_AMBIGUOUS' if len(choices) > 1 else
+              'CONTENT_TEMPLATE_RESULT_MISSING' if not choices else 'CONTENT_TEMPLATE_RESULT_NOT_STABLE')
+    tools.browser.trace.agent_event('content_template_results_settled', role='observer',
+        status=reason, exact_option_count=len(choices), visible_option_count=evidence.get('visible_owned'))
+    return blocked(reason, option_evidence=evidence)
+
+
 async def choose_dropdown(tools, field, control):
     if tools.binding(field).kind == 'native_select':
         if field == 'tag':
@@ -57,24 +87,36 @@ async def choose_dropdown(tools, field, control):
                 failure=opened.get('error'), trigger_resolved=len(fresh) == 1,
                 trigger_expanded=inspection.get('expanded'), owned_menu_observed=observed_open,
                 inspection_error=inspection.get('error'))
-            if not observed_open:
+            if not observed_open and field == 'template' and len(fresh) == 1 and inspection.get('expanded') is False:
+                retried = await field_action(tools, field, 'click', fresh[0]['reference'])
+                if not retried.get('dropdown_open_verified'):
+                    return retried
+            elif not observed_open:
                 return blocked(opened.get('error', 'OWNED_DROPDOWN_NOT_OPEN'),
                                trigger_inspection=inspection.get('error'),
                                trigger_expanded=inspection.get('expanded'))
     searched = False
-    if field == 'tag' or not controls_for(tools, field, 'option'):
+    audience_search = getattr(tools, 'audience_option', None) is not None
+    if field in {'tag', 'template'} or audience_search or not controls_for(tools, field, 'option'):
         searches = controls_for(tools, field, 'search')
         if not searches:
             searches = [item for item in controls_for(tools, field)
                         if item.get('tag') == 'INPUT' and item.get('type') in {'text', 'search'}]
         if len(searches) == 1:
+            if field == 'template':
+                focused = await field_action(tools, field, 'click', searches[0]['reference'])
+                if not focused.get('focused'):
+                    return focused
             search = await field_action(tools, field, 'search', searches[0]['reference'])
             if not search.get('ok'):
                 return search
             searched = True
             await tools.observe()
-        elif field == 'tag':
-            return blocked('TAG_PICKER_SEARCH_NOT_UNIQUE', found=len(searches))
+        elif field in {'tag', 'template'} or audience_search:
+            code = {'tag':'TAG_PICKER_SEARCH_NOT_UNIQUE','template':'CONTENT_OWNED_SEARCH_INPUT_NOT_UNIQUE'}
+            return blocked(code.get(field, 'AUDIENCE_OWNED_SEARCH_INPUT_NOT_UNIQUE'), found=len(searches))
+    if field == 'template':
+        return await choose_settled_template(tools)
     # Read-only wait for the options of the already-open, owned picker.
     for attempt in range(3):
         choices = controls_for(tools, field, 'option')
@@ -201,6 +243,162 @@ async def run_page1_fields(tools, recover):
     return verdict
 
 
+
+async def close_owned_audience_menu(tools, field):
+    document = await tools.protect()
+    binding = await tools.verify_binding(field)
+    page = tools.browser.page
+    script = r"""(s=>{
+      const matches=document.querySelectorAll(s.q), e=matches.length===1?matches[0]:null;
+      if(!e)return {status:'UNBOUND'};
+      const ids=((e.getAttribute('aria-controls')||'')+' '+(e.getAttribute('aria-owns')||'')).split(/\s+/).filter(Boolean);
+      const oldPanels=[...new Set([...s.previous,...ids])].map(id=>document.getElementById(id)).filter(Boolean);
+      const visible=n=>n.getClientRects().length>0&&getComputedStyle(n).visibility==='visible'&&
+        !n.closest('[hidden],[aria-hidden=true],[inert]');
+      if(e.getAttribute('aria-expanded')!=='true')
+        return {status:oldPanels.some(visible)?'PANEL_STILL_VISIBLE':'CLOSED',ids};
+      if(!ids.some(id=>document.getElementById(id)?.getClientRects().length))return {status:'UNBOUND',ids};
+      if(s.focus&&e.tabIndex>=0)e.focus({preventScroll:true});
+      const active=document.activeElement;
+      const owned=active===e||ids.some(id=>document.getElementById(id)?.contains(active));
+      return {status:owned?'OWNED_FOCUS':'FOCUS_OUTSIDE_MENU',ids};
+    })("""
+    async def read_state(previous=(), focus=False):
+        settings = {'q': binding.selector, 'previous': previous, 'focus': focus}
+        return await page.evaluate(script + json.dumps(settings) + ')')
+
+    approaches = []
+    facts = await read_state()
+    status = facts['status']
+    ids = facts.get('ids', ())
+    if status == 'FOCUS_OUTSIDE_MENU' and await tools.protect() == document:
+        status = (await read_state(ids, focus=True))['status']
+    if status == 'OWNED_FOCUS':
+        if await tools.protect() != document or (await read_state(ids))['status'] != 'OWNED_FOCUS':
+            raise V2Stop('AUDIENCE_MENU_FOCUS_CHANGED', owner='recognition')
+        await page.key_press('Escape')
+        approaches.append({'method':'escape','status':'DISPATCHED'})
+    if status in {'OWNED_FOCUS', 'PANEL_STILL_VISIBLE'}:
+        for _ in range(6):
+            if await tools.protect() != document:
+                raise V2Stop('AUDIENCE_MENU_DOCUMENT_CHANGED', owner='browser', unsafe=True)
+            status = (await read_state(ids))['status']
+            if status == 'CLOSED':
+                break
+            await asyncio.sleep(.15)
+    if approaches:
+        approaches[-1]['results_hidden'] = status=='CLOSED'
+    if status == 'OWNED_FOCUS':
+        from browser.observed_control import observed_node
+        backdrop_script = r'''(s=>{
+          const triggers=document.querySelectorAll(s.q), trigger=triggers.length===1?triggers[0]:null;
+          if(!trigger||trigger.getAttribute('aria-expanded')!=='true')return null;
+          const live=((trigger.getAttribute('aria-controls')||'')+' '+(trigger.getAttribute('aria-owns')||''))
+            .split(/\s+/).filter(Boolean);
+          const panels=s.ids.filter(id=>live.includes(id)).map(id=>document.getElementById(id)).filter(p=>
+            p?.getClientRects().length&&getComputedStyle(p).visibility==='visible');
+          if(panels.length!==1)return null;
+          const pane=panels[0].closest('.cdk-overlay-pane');
+          const container=pane?.closest('.cdk-overlay-container');
+          let owner=pane;
+          while(owner&&owner.parentElement!==container)owner=owner.parentElement;
+          const backdrop=owner?.previousElementSibling;
+          if(!container||!backdrop?.matches('.cdk-overlay-backdrop.cdk-overlay-backdrop-showing')||
+             !backdrop.getClientRects().length)return null;
+          const selector='.cdk-overlay-container > :nth-child('+([...container.children].indexOf(backdrop)+1)+')';
+          const found=document.querySelectorAll(selector);
+          if(found.length!==1||found[0]!==backdrop)return null;
+          const rect=backdrop.getBoundingClientRect();
+          const left=Math.max(0,rect.left),right=Math.min(innerWidth,rect.right);
+          const top=Math.max(0,rect.top),bottom=Math.min(innerHeight,rect.bottom);
+          if(right-left<4||bottom-top<4)return null;
+          for(const f of [.1,.9,.5]){
+            const x=left+(right-left)*f,y=top+(bottom-top)*f;
+            if(document.elementFromPoint(x,y)===backdrop)return {selector,x,y};
+          }
+          return null;
+        })(SETTINGS)'''.replace('SETTINGS',json.dumps({'q':binding.selector,'ids':ids}))
+        hit = await page.evaluate(backdrop_script)
+        if hit:
+            identity = await observed_node(tools.browser, hit['selector'])
+            if (await tools.protect() != document or await observed_node(tools.browser, hit['selector']) != identity
+                    or await page.evaluate(backdrop_script) != hit):
+                raise V2Stop('AUDIENCE_MENU_BACKDROP_CHANGED', owner='recognition')
+            await page.click(hit['x'], hit['y'])
+            for _ in range(6):
+                if await tools.protect() != document:
+                    raise V2Stop('AUDIENCE_MENU_DOCUMENT_CHANGED', owner='browser', unsafe=True)
+                status = (await read_state(ids))['status']
+                if status == 'CLOSED':
+                    break
+                await asyncio.sleep(.15)
+            approaches.append({'method':'owned_backdrop','status':'DISPATCHED','results_hidden':status=='CLOSED'})
+        else:
+            approaches.append({'method':'owned_backdrop','status':'NO_PROVEN_HIT'})
+    tools.browser.trace.agent_event('campaign_audience_menu_close', role='observer', field=field, status=status,
+                                    results_hidden=status=='CLOSED', approaches=approaches)
+    if status != 'CLOSED':
+        raise V2Stop('AUDIENCE_OWNED_MENU_CLOSE_NOT_VERIFIED', owner='recognition')
+    await tools.observe()
+
+
+async def select_audience_set(tools, field):
+    selected = await deterministic_readback(tools, fields=(field,), operator_details=field=='exclude_audience')
+    unexpected = selected.get('terminal_unexpected', {}).get(field, [])
+    if unexpected:
+        print('AUDIENCE_UNEXPECTED_EXCLUSIONS ' + json.dumps(unexpected), flush=True)
+        return blocked('AUDIENCE_UNEXPECTED_EXCLUSIONS_OPERATOR_INPUT_REQUIRED', observed_count=len(unexpected))
+    if selected['fields'].get(field):
+        if field == 'include_audience':
+            await close_owned_audience_menu(tools, field)
+            state = await deterministic_readback(tools, fields=(field,))
+            if not state['fields'].get(field):
+                return blocked('AUDIENCE_INCLUDE_READBACK_CHANGED_AFTER_CLOSE')
+        else:
+            from modules.whatsapp.observer import verify_audience_exclusion_summary
+            tools.browser.trace.agent_event('campaign_exclude_chip_verified', role='observer',
+                                            status='VERIFIED_EXISTING', count=len(tools.payload.audience_values(field)))
+            summary = await verify_audience_exclusion_summary(tools, reveal=True)
+            print('AUDIENCE_EXCLUSION_SUMMARY ' + json.dumps(summary), flush=True)
+        return {'ok': True, 'changed': False}
+    changed = False
+    expected = tools.payload.audience_values(field)
+    for value in expected:
+        tools.audience_option = (field, value)
+        try:
+            tools.mutations = 0
+            await tools.observe(strategy='dom')
+            state = await deterministic_readback(tools, fields=(field,))
+            if state['fields'].get(field):
+                continue
+            choices = controls_for(tools, field)
+            if len(choices) != 1:
+                reason = (tools.last_observation or {}).get('binding_failures', {}).get(field)
+                return blocked(reason or 'CURRENT_ENABLED_CONTROL_NOT_UNIQUE', control_count=len(choices))
+            if tools.binding(field).kind != 'combobox':
+                return blocked('AUDIENCE_OWNED_PICKER_KIND_NOT_SUPPORTED')
+            result = await choose_dropdown(tools, field, choices[0])
+            if not result.get('ok'):
+                return result
+            changed = True
+        finally:
+            tools.audience_option = None
+    if changed:
+        await close_owned_audience_menu(tools, field)
+    state = await deterministic_readback(tools, fields=(field,))
+    proof = state.get('selected_sets', {}).get(field)
+    if proof is None:
+        reason = (tools.last_observation or {}).get('binding_failures', {}).get(field)
+        return blocked(reason or 'AUDIENCE_SELECTION_STATE_UNOBSERVED')
+    if not state['fields'].get(field):
+        return blocked('AUDIENCE_SELECTED_SET_MISMATCH', observed_count=proof['count'])
+    if field == 'exclude_audience':
+        from modules.whatsapp.observer import verify_audience_exclusion_summary
+        summary = await verify_audience_exclusion_summary(tools, reveal=True)
+        print('AUDIENCE_EXCLUSION_SUMMARY ' + json.dumps(summary), flush=True)
+    return {'ok': True, 'changed': changed}
+
+
 async def run_campaign_fields(tools, stage):
     from modules.whatsapp.page1_transition import campaign_content_requirements, verify_active_campaign_stage
 
@@ -215,7 +413,14 @@ async def run_campaign_fields(tools, stage):
             readback = await deterministic_readback(tools, fields=(field,))
             result = {'ok': True}
             action = 'ALREADY_MATCHED'
-            if not readback['fields'].get(field):
+            if stage == 'audience' and field in {'include_audience', 'exclude_audience'}:
+                result = await select_audience_set(tools, field)
+                action = 'UNRESOLVED'
+                if result.get('ok'):
+                    action = 'SELECTED' if result.get('changed') else 'VERIFIED_EXISTING'
+                if result.get('ok'):
+                    readback = await deterministic_readback(tools, fields=(field,))
+            elif not readback['fields'].get(field):
                 choices = controls_for(tools, field)
                 if len(choices) != 1:
                     reason = (tools.last_observation or {}).get('binding_failures', {}).get(field)
@@ -233,19 +438,31 @@ async def run_campaign_fields(tools, stage):
             report = {'field': field, 'action': action, 'readback': 'MATCH' if matched else 'UNRESOLVED',
                       'reason': None if matched else result.get('error', 'FIELD_READBACK_NOT_ESTABLISHED')}
             tools.browser.trace.agent_event('campaign_field_readback', role='observer', campaign_step=stage, **report)
-            print('CAMPAIGN_FIELD ' + json.dumps({**report, 'approved_value': getattr(tools.payload, field)}), flush=True)
+            effective = (tools.payload.audience_values(field)
+                         if field in {'include_audience', 'exclude_audience'} else getattr(tools.payload, field))
+            print('CAMPAIGN_FIELD ' + json.dumps({**report, 'approved_value': effective,
+                  'observed_count': result.get('observed_count')}), flush=True)
             if not matched:
                 if stage == 'audience':
                     pickers = (tools.last_observation or {}).get('audience_picker_evidence', [])
-                    print('AUDIENCE_PICKER_EVIDENCE ' + json.dumps(pickers), flush=True)
+                    sections = (tools.last_observation or {}).get('audience_section_evidence', {})
+                    print('AUDIENCE_PICKER_EVIDENCE ' + json.dumps({'pickers': pickers, 'sections': sections}), flush=True)
                 raise V2Stop(report['reason'], owner='recognition', unsafe=bool(tools.pending_write))
-            verified[field] = getattr(tools.payload, field)
+            verified[field] = effective
         finally:
             tools.page1_current_field = None
     facts = await deterministic_readback(tools, fields=fields)
     if not facts.get('stage_visible') or not all(facts['fields'].get(field) for field in fields):
         raise V2Stop('CAMPAIGN_FINAL_READBACK_CHANGED', owner='recognition')
     if stage == 'content':
+        for _ in range(6):
+            if facts.get('checks', {}).get('template_preview_visible'):
+                break
+            await asyncio.sleep(.5)
+            await tools.observe()
+            facts = await deterministic_readback(tools, fields=fields)
+        if not all(facts['fields'].get(field) for field in fields):
+            raise V2Stop('CONTENT_CLOSED_TEMPLATE_READBACK_CHANGED', owner='recognition')
         requirements = await campaign_content_requirements(tools)
         if requirements:
             print('CONTENT INPUT REQUIRED. Provide the approved values for: ' + ', '.join(requirements), flush=True)
@@ -254,5 +471,8 @@ async def run_campaign_fields(tools, stage):
             raise V2Stop('CONTENT_TEMPLATE_VARIABLE_INPUTS_REQUIRED', owner='recognition')
         if not facts.get('checks', {}).get('template_preview_visible'):
             raise V2Stop('CONTENT_RENDERED_PREVIEW_NOT_VERIFIED', owner='recognition')
+    if stage == 'audience':
+        for field in ('include_audience', 'exclude_audience'):
+            verified[field] = facts['selected_sets'][field]['matched']
     print('CAMPAIGN_STEP_VERIFIED ' + json.dumps({'step': stage, 'values': verified}), flush=True)
     return facts

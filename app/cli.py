@@ -233,6 +233,9 @@ def build_parser():
     human_assisted.add_argument('--operator-confirmed-runs', type=int, choices=(1, 2, 3), default=1)
     human_assisted.add_argument('--page1-through-audience', action='store_true')
     human_assisted.add_argument('--through-schedule', action='store_true')
+    human_assisted.add_argument('--save-schedule-draft', action='store_true')
+    human_assisted.add_argument('--through-audience', action='store_true')
+    human_assisted.add_argument('--capture-audience-failure', action='store_true')
     human_assisted.add_argument('--authorized-learning',action='store_true',
         help='Reserve one Teacher review and permit an unapproved candidate after recoverable failure; no live retry')
     human_assisted.add_argument('--login-api-budget',type=int,default=6)

@@ -5,7 +5,7 @@ from browser.observed_control import observed_node, protected_document
 from modules.whatsapp.browser_baseline import reject_security_negatives
 from modules.whatsapp.contract import SETUP_URL, PAGE1_SETUP_FIELDS, STAGE_FIELDS, V2Stop
 from modules.whatsapp.destination import cdp_frame_url, campaign_step_route, classify_setup_page
-from modules.whatsapp.observation import V2_LABEL_HELPERS
+from modules.whatsapp.observation import V2_LABEL_HELPERS, CAMPAIGN_PICKER_HELPERS
 from modules.whatsapp.observer import deterministic_readback
 
 
@@ -35,8 +35,14 @@ CAMPAIGN_DOM = r'''
    const match=names=>labels.some(label=>names.includes(label.replace(/[:*]+$/g,'').trim()));
    if(step==='setup')return match(['campaign name','campaign title'])?'CAMPAIGN_NAME':null;
    if(step==='audience')return match(['lists/segments','lists / segments'])?'LISTS_SEGMENTS':null;
-   if(step==='content')return match(['template','select template','choose template','whatsapp template','select whatsapp template'])?
-     'TEMPLATE_SELECTOR':null;
+   if(step==='content'){
+     const owned=campaignPickerOwners('content').template;
+     const labelled=[...document.querySelectorAll('select,[role=combobox]')].filter(e=>visible(e)&&
+       ['template','select template','choose template','whatsapp template','select whatsapp template']
+         .includes(norm(fieldLabel(e,'dom')).replace(/[:*]+$/g,'').trim()));
+     if(visible(owned)||labelled.length===1)return 'TEMPLATE_SELECTOR';
+     return null;
+   }
    return match(['send later','schedule date','schedule time','schedule date and time','frequency cap','contact limit'])?
      'SCHEDULE_CONTROL':null;
  };
@@ -78,11 +84,11 @@ CAMPAIGN_DOM = r'''
  };
 '''
 
-CAMPAIGN_SURFACE = r'''(s=>{''' + V2_LABEL_HELPERS + CAMPAIGN_DOM + r'''
+CAMPAIGN_SURFACE = r'''(s=>{''' + V2_LABEL_HELPERS + CAMPAIGN_PICKER_HELPERS + CAMPAIGN_DOM + r'''
  return {active_steps:namedSteps, control:lookupStage(s.stage,location.hash.slice(1)),validation:validation()};
 })(SETTINGS)'''
 
-CAMPAIGN_HEADER = r'''(s=>{''' + V2_LABEL_HELPERS + CAMPAIGN_DOM + r'''
+CAMPAIGN_HEADER = r'''(s=>{''' + V2_LABEL_HELPERS + CAMPAIGN_PICKER_HELPERS + CAMPAIGN_DOM + r'''
  const scope=one(s.scope);
  if(!visible(scope))return {status:'ACTIVE_STAGE_SCOPE_NOT_VISIBLE'};
  const surface=lookupStage(s.stage,location.hash.slice(1));
@@ -112,8 +118,10 @@ async def campaign_content_requirements(tools):
         (r'''(s=>{''' + V2_LABEL_HELPERS + CAMPAIGN_DOM + r'''
           const scope=one(s.scope);
           if(!visible(scope))return null;
-          return [...scope.querySelectorAll('input,textarea,[contenteditable=true]')].filter(e=>
-            visible(e)&&!e.disabled&&!e.matches('input[type=hidden],input[type=radio],input[type=checkbox],input[type=password],input[type=search]')&&
+          const root=scope.closest('main,[role=tabpanel]')||scope.closest('form,[role=form],section')||scope;
+          return [...root.querySelectorAll('input,select,textarea,[contenteditable=true]')].filter(e=>
+            (visible(e)||e.type==='file'&&[...e.labels].some(visible))&&!e.disabled&&
+            !e.matches('input[type=hidden],input[type=radio],input[type=checkbox],input[type=password],input[type=search]')&&
             (e.required||e.getAttribute('aria-required')==='true')&&!String(e.value??e.innerText??'').trim()
           ).map((e,i)=>{
             const label=(fieldLabel(e,'dom')||'').trim();
@@ -147,6 +155,9 @@ async def advance_campaign_step(tools, stage, destination, mark_attempt):
             stage == 'content' and not facts.get('checks', {}).get('template_preview_visible')):
         raise V2Stop('PAGE1_ALL_FIELDS_READBACK_REQUIRED', owner='recognition')
 
+    if stage == 'audience':
+        from modules.whatsapp.observer import verify_audience_exclusion_summary
+        await verify_audience_exclusion_summary(tools)
     if stage == 'content' and await campaign_content_requirements(tools):
         raise V2Stop('CONTENT_TEMPLATE_VARIABLE_INPUTS_REQUIRED', owner='recognition')
     scope = tools.ui.stage_selectors.get(stage)

@@ -671,7 +671,7 @@ def compact_human_assisted_teacher_evidence(package):
             login_actions.append({'ref': 'trace:' + str(card['events'][-1]), 'tool': tool,
                                   'kind': card['kind']})
     event_keys = ('id', 'trace_ref', 'stage', 'field', 'action', 'approach', 'attempted',
-                  'valid_approach', 'ok', 'progress', 'error', 'owner', 'unsafe', 'verification')
+                  'valid_approach', 'ok', 'progress', 'error', 'owner', 'unsafe', 'verification', 'evidence_refs')
     facts = ('stage_visible', 'field_evidence', 'unresolved_fields', 'recognition_status',
              'dropdown_open_verified', 'search_text_verified', 'selection_verified', 'fields')
     events = [{**{key: event[key] for key in event_keys if key in event},
@@ -689,13 +689,19 @@ def compact_human_assisted_teacher_evidence(package):
             pos = strategy_lines.index(heading)
             excerpt.extend(strategy_lines[pos:pos+6])
     evidence_ids = [card['ref'] for card in login_actions] + [event['id'] for event in events]
+    browser_cards = package.get('browser_observer_evidence', [])
+    browser_ids = {event['id'] for event in browser_cards if event.get('id')}
+    for event in events:
+        event['evidence_refs'] = [ref for ref in event.get('evidence_refs', ()) if ref in browser_ids]
+    evidence_ids += sorted(browser_ids)
+    evidence_ids += [event['trace_ref'] for event in events if event.get('trace_ref')]
     evidence_ids += [event['id'] for event in (package.get('tool_schema_rejections') or []) if event.get('id')]
     evidence_ids += [finding['readback']['evidence_ref'] for finding in observer
                      if isinstance(finding, dict) and finding.get('readback', {}).get('evidence_ref')]
     if package.get('failure'):
         evidence_ids.append('controller_failure')
     result.update(events=events, login_execution_evidence={'actions': login_actions},
-        observer=observer, strategy_excerpt='\n'.join(excerpt)[:1400],
+        observer=observer, browser_observer_evidence=browser_cards, strategy_excerpt='\n'.join(excerpt)[:1400],
         evidence_ids=list(dict.fromkeys(evidence_ids)))
     return result
 
@@ -750,6 +756,29 @@ async def review_v2_attempt(ctx,state,authorization,payload,*,analysis_only=Fals
                 tool_schema_rejections=[{key: event['agent_execution'].get(key) for key in
                     ('id', 'action', 'reason', 'unexpected', 'missing')}
                     for event in trace.events if event.get('agent_execution', {}).get('kind') == 'browser_action_rejected'][-4:])
+            decisive = {'campaign_audience_menu_close','campaign_audience_summary_readback',
+                        'campaign_field_readback','campaign_header_binding','page1_transition_unresolved','campaign_exclude_chip_verified',
+                        'setup_evidence_saved','content_template_target_ownership','content_template_results_settled'}
+            task_refs = {ref for event in selected_events for ref in event.get('evidence_refs', ())}
+            browser_cards = []
+            for entry in trace.events:
+                event = entry.get('agent_execution') or {}
+                kind = event.get('kind')
+                if kind not in decisive and event.get('id') not in task_refs:
+                    continue
+                if kind == 'dom_observation':
+                    observed = event.get('result', {})
+                    card = {key: observed[key] for key in ('stage','field_evidence','binding_failures','scope_basis',
+                            'audience_picker_evidence','audience_section_evidence','content_preview_evidence') if key in observed}
+                else:
+                    card = {key: event[key] for key in ('stage','field','status','reason','code','results_hidden',
+                            'source_step','destination_step','readback','expected_count','matched_count','evidence_ref','approaches',
+                            'panel_count','competing_owner_count','owned_search_delegate','visible_option_count','exact_option_count')
+                            if key in event}
+                browser_cards.append({'id':event['id'],'kind':kind,'facts':card})
+            latest = [card for card in browser_cards if card['kind'] in decisive][-7:]
+            selected_refs = [card for card in browser_cards if card['kind'] not in decisive][-6:]
+            package['browser_observer_evidence'] = selected_refs + latest
         package=trace.redact_agent(package)
         evidence_bytes=json.dumps(package,sort_keys=True).encode('utf-8')
         (ctx['directory']/'teacher-input-evidence.json').write_bytes(evidence_bytes)
@@ -781,6 +810,7 @@ async def review_v2_attempt(ctx,state,authorization,payload,*,analysis_only=Fals
         rejection=teacher_factual_contradiction(prose,actual,ctx['authentication_verified'],task_invoked=task_invoked) or rejection
         if rejection:
             ctx['teacher_rejection']=trace.redact_agent({'code':rejection,'response':lesson.model_dump(),
+                'unlisted_evidence_refs':sorted(set(lesson.evidence_refs)-set(ids)),
                 'actual_execution_facts':actual,'source_response_sha256':hashlib.sha256(lesson.model_dump_json().encode()).hexdigest()})
             trace.agent_event('teacher_rejected',role='teacher',rejection=ctx['teacher_rejection'])
             raise V2Stop(rejection,owner='controller')
@@ -1409,7 +1439,8 @@ def human_assisted_review_kind(state, evaluation):
     if (failure.get('unsafe') or failure.get('code') == 'OPERATOR_CANCELLED' or
             failure.get('owner') in {'authorization', 'authentication', 'uncertain_write', 'browser'}):
         return None
-    if failure.get('code') == 'CODE_FIX_REQUIRED' or failure.get('owner') in {'controller', 'tool'}:
+    if (failure.get('code') == 'CODE_FIX_REQUIRED' or failure.get('owner') in {'controller', 'tool'}
+            or (failure.get('failing_stage') or '').startswith(('audience_', 'content_', 'schedule_'))):
         return 'technical_analysis'
     if evaluation.get('status') == 'COMPLETE':
         return 'success_review'
@@ -1465,8 +1496,12 @@ async def run_human_assisted(args):
     operator_confirmed_mode = getattr(args, 'operator_confirmed_login', False)
     page1 = getattr(args, 'page1_through_audience', False)
     through_schedule = getattr(args, 'through_schedule', False)
-    if through_schedule and not page1:
-        raise ConfigurationError('Through Schedule requires the operator-confirmed Page 1 path')
+    through_audience = getattr(args, 'through_audience', False)
+    save_schedule_draft = getattr(args, 'save_schedule_draft', False)
+    if save_schedule_draft and not through_schedule:
+        raise ConfigurationError('Draft save requires the Through Schedule launcher')
+    if (through_schedule or through_audience) and not page1 or through_schedule and through_audience:
+        raise ConfigurationError('Select one operator-confirmed campaign walkthrough endpoint')
     if page1 and (not operator_confirmed_mode or not manual_requested or
                   getattr(args, 'operator_confirmed_runs', 1) != 1):
         raise ConfigurationError('Page 1 through Audience requires one operator-confirmed Setup run')
@@ -1552,8 +1587,20 @@ async def run_human_assisted(args):
                           tenant=setup_parts.path.strip('/').split('/')[0])
     approved_payload = ('a47cf5865bfaccfac9b7a4de7a4fa6ddec074aa21f73c52391e0a6ad89b0361d' if page1
                         else '594cfa8b180477ba5f90f279851e8a8f0fbe1b31123a4b6a758950a8c0cc88ac')
-    payload, digest = load_v2_payload(ROOT / 'credentials/whatsapp-v2-payload.json',
-                                      approved_digest=approved_payload)
+    if through_audience or through_schedule:
+        approved_payload = 'a4ec605b8f742e8d9406260c8a83a6368614064251089bbc757c088fc6f14302'
+    payload_path = ROOT / 'credentials/whatsapp-v2-payload.json'
+    payload, digest = load_v2_payload(payload_path, approved_digest=approved_payload)
+    if save_schedule_draft:
+        resolved_schedule = payload.scheduled_local()
+        print('SCHEDULE_PAYLOAD ' + json.dumps({'path':str(payload_path),'schedule':resolved_schedule.isoformat(),
+            'timezone':payload.timezone}), flush=True)
+    if through_schedule:
+        print('CONTENT_PAYLOAD ' + json.dumps({'path': str(payload_path), 'template': payload.template}), flush=True)
+    if through_audience or through_schedule:
+        print('AUDIENCE_PAYLOAD ' + json.dumps({'path': str(payload_path), 'mode': payload.audience_type,
+            'include': payload.audience_values('include_audience'),
+            'exclude': payload.audience_values('exclude_audience')}), flush=True)
     selected_candidate = None
     if candidate_version:
         selected_candidate = whatsapp_skill(candidate=candidate_version,
@@ -2127,22 +2174,57 @@ async def run_human_assisted(args):
         browser.page = browser.setup_page = page
         browser.setup_binding = binding
         if operator_tab is not None:
-            from modules.whatsapp.destination import classify_setup_page, DestinationRejected
+            from modules.whatsapp.destination import (classify_setup_page, DestinationRejected,
+                landing_route_parts, same_tenant_landing_path)
             prior_navigation = browser.guard.navigation_observer
+            prior_route = landing_route_parts("about:blank")
             def watch_setup_navigation(kind, session, url, **kwargs):
+                nonlocal prior_route
                 if session == binding.session and kind in {'DOCUMENT_REQUEST', 'DOCUMENT_COMMITTED', 'SAME_DOCUMENT_NAVIGATION'}:
+                    route_facts = {}
+                    predicate = None
                     try:
-                        expected = classify_setup_page(url, SETUP_URL)['route_match']
-                    except DestinationRejected:
+                        setup_route = classify_setup_page(url, SETUP_URL)
+                        expected = setup_route['route_match']
+                        route_facts = setup_route['diagnostic']
+                    except DestinationRejected as error:
                         expected = False
+                        predicate = error.predicate
                     if page1 and context.get('campaign_transition_destination') and not expected:
                         from modules.whatsapp.destination import campaign_step_route
                         expected = any(campaign_step_route(url, step) for step in
                             (context.get('campaign_transition_source'), context['campaign_transition_destination']))
-                    if urlsplit(url).hostname == urlsplit(config.login_url).hostname:
+                    current_route = landing_route_parts(url)
+                    before_route = prior_route
+                    if kind != 'DOCUMENT_REQUEST':
+                        prior_route = current_route
+                    if before_route != current_route:
+                        trace.agent_event('operator_campaign_route_observed', role='controller',
+                            navigation_kind=kind, before=before_route, after=current_route, route_match=expected)
+                    signin = current_route['hostname'] == urlsplit(config.login_url).hostname
+                    pending = context.get('setup_landing_pending_since')
+                    settling = (page1 and not context.get('setup_landing_certified')
+                        and kind == 'SAME_DOCUMENT_NAVIGATION' and same_tenant_landing_path(url, SETUP_URL)
+                        and (pending is not None or before_route in (landing_route_parts(SETUP_URL),
+                                                                     landing_route_parts(SETUP_URL + '#setup'))))
+                    if signin:
                         context['operator_setup_stop'] = 'OPERATOR_SETUP_REDIRECTED_TO_SIGN_IN'
                     elif not expected and url != 'about:blank':
-                        context['operator_setup_stop'] = 'OPERATOR_SETUP_ROUTE_MISMATCH'
+                        if settling:
+                            if pending is None:
+                                context['setup_landing_pending_since'] = monotonic()
+                        else:
+                            context['operator_setup_stop'] = 'OPERATOR_SETUP_ROUTE_MISMATCH'
+                    if not expected and url != 'about:blank':
+                        failed = [name for name in ('path_match', 'query_match') if route_facts.get(name) is False]
+                        if route_facts.get('fragment_class') == 'UNEXPECTED':
+                            failed.append('fragment_class')
+                        trace.agent_event('operator_campaign_route_rejected', role='controller',
+                            navigation_kind=kind, code=context.get('operator_setup_stop'),
+                            before=before_route, after=current_route,
+                            disposition='WAIT_READ_ONLY' if settling and not signin else 'STOP',
+                            failed_predicates=[predicate] if predicate else failed,
+                            fragment_class=route_facts.get('fragment_class'))
                 if prior_navigation:
                     prior_navigation(kind, session, url, **kwargs)
             browser.guard.navigation_observer = watch_setup_navigation
@@ -2168,7 +2250,9 @@ async def run_human_assisted(args):
         # Register payload strings with the existing trace redactor; never add
         # credentials or reset any Login trace/phase state.
         trace._agent_private=tuple(sorted(set(getattr(trace,'_agent_private',()))|
-            {v for v in payload.model_dump().values() if isinstance(v,str) and len(v)>=4},key=len,reverse=True))
+            {v for v in payload.model_dump().values() if isinstance(v,str) and len(v)>=4} |
+            {v for field in ('include_audience','exclude_audience') for v in payload.audience_values(field)
+             if len(v)>=4},key=len,reverse=True))
         context.update(tools=tools,payload=payload,authorization=authorization,task_digest=digest)
         (artifact_dir/'loaded-task-skill.md').write_bytes(skill.content.encode('utf-8'))
         trace.agent_event('loaded_task_skill',role='controller',content_sha256=skill.digest,
@@ -2180,7 +2264,8 @@ async def run_human_assisted(args):
         tools.read_only = manual_requested or not authorization.manual_form_test
         tools.manual_authentication_verified = verified
         context['failure_stage']='setup_pre_observation_protection'
-        await tools.protect()
+        if not page1:
+            await tools.protect()
         if manual_requested:
             context['failure_stage'] = 'setup_preapproval_visibility'
             quiet_terminal = True
@@ -2188,15 +2273,39 @@ async def run_human_assisted(args):
                 visibility_window = asyncio.timeout(operation_seconds)
                 try:
                     async with visibility_window:
-                        observed_document = await tools.protect()
-                        form = await tools.observe(strategy='dom' if page1 else None)
-                        while page1 and form.get('stage_visible') is not True:
-                            context['page_observations'] = form
-                            await asyncio.sleep(.5)
-                            if await tools.protect() != observed_document:
-                                raise V2Stop('SETUP_DOCUMENT_CHANGED_DURING_PREFLIGHT',
+                        while True:
+                            pending = context.get('setup_landing_pending_since')
+                            if pending is not None and monotonic() - pending >= 4:
+                                trace.agent_event('operator_campaign_landing_timeout', role='observer',
+                                    route=landing_route_parts(await browser.page.url()), wait_seconds=4)
+                                raise V2Stop('OPERATOR_SETUP_LANDING_DID_NOT_RETURN_TO_VERIFIED_SETUP',
                                              owner='browser', unsafe=True)
-                            form = await tools.observe(strategy='dom')
+                            try:
+                                observed_document = await tools.protect()
+                                form = await tools.observe(strategy='dom' if page1 else None)
+                                if not page1:
+                                    break
+                                if await tools.protect() != observed_document:
+                                    raise V2Stop('SETUP_DOCUMENT_CHANGED_DURING_PREFLIGHT',
+                                                 owner='browser', unsafe=True)
+                                ready = (form.get('stage_visible') is True and
+                                         'campaign_name' in form.get('field_evidence', ()) and
+                                         (tools._last_protected_route or {}).get('fragment_class') == 'SETUP')
+                                pending = context.get('setup_landing_pending_since')
+                                if ready and (pending is None or monotonic() - pending < 4):
+                                    context['setup_landing_certified'] = True
+                                    trace.agent_event('operator_campaign_landing_verified', role='observer',
+                                        route=landing_route_parts(await browser.page.url()),
+                                        transient_path_observed=pending is not None,
+                                        active_setup=True, form_visible=True)
+                                    break
+                                context['page_observations'] = form
+                            except V2Stop as error:
+                                pending = context.get('setup_landing_pending_since')
+                                if (pending is None or context.get('operator_setup_stop') or error.code not in
+                                        {'OPERATOR_SETUP_ROUTE_MISMATCH','PROTECTED_TASK_FRAGMENT_UNSUPPORTED'}):
+                                    raise
+                            await asyncio.sleep(.25)
                         require_setup_observation(form)
                 except TimeoutError:
                     if not visibility_window.expired():
@@ -2396,15 +2505,20 @@ async def run_human_assisted(args):
                 if context['audience_transition']['status'] == 'AUDIENCE_VISIBLE':
                     context['last_verified_step'] = 'AUDIENCE_VISIBLE'
                     outcome = 'PAGE1_AUDIENCE_VISIBLE'
-                    if through_schedule:
+                    if through_audience or through_schedule:
                         from modules.whatsapp.page1_fields import run_campaign_fields
                         from modules.whatsapp.page1_transition import advance_campaign_step
-                        for step, destination in (('audience', 'content'), ('content', 'schedule')):
+                        transitions = [('audience', 'content')]
+                        if through_schedule:
+                            transitions.append(('content', 'schedule'))
+                        for step, destination in transitions:
                             tools.stage = tools.campaign_verified_stage = step
                             context['failure_stage'] = step + '_fields'
                             try:
                                 await run_campaign_fields(tools, step)
                             except V2Stop as error:
+                                if step == 'content' and tools.last_independent_readback.get('fields', {}).get('template') is True:
+                                    context['last_verified_step'] = 'CONTENT_TEMPLATE_VERIFIED'
                                 print(f'CAMPAIGN_STEP_BLOCKED {step} {error.code}', flush=True)
                                 raise
                             context['last_verified_step'] = step.upper() + '_FIELDS_VERIFIED'
@@ -2432,6 +2546,31 @@ async def run_human_assisted(args):
                             tools.stage = tools.campaign_verified_stage = destination
                             context['last_verified_step'] = destination.upper() + '_VISIBLE'
                             outcome = context['last_verified_step']
+                        if save_schedule_draft and outcome == 'SCHEDULE_VISIBLE':
+                            from modules.whatsapp.schedule_draft import ScheduleDraft
+                            context['failure_stage'] = 'schedule_fields'
+                            schedule = ScheduleDraft(tools)
+                            await schedule.apply()
+                            context['last_verified_step'] = 'SCHEDULE_FIELDS_VERIFIED'
+                            context['failure_stage'] = 'schedule_draft_approval'
+                            target = await schedule.require_save_control()
+                            seconds = min(review_seconds, int(human_assisted_remaining_seconds(
+                                session_seconds, context['started'])))
+                            quiet_terminal = True
+                            try:
+                                decision = await console.confirm_save_draft_preview(seconds) if seconds > 0 else 'timeout'
+                            finally:
+                                quiet_terminal = False
+                            if decision == 'yes':
+                                context['failure_stage'] = 'schedule_save_and_preview'
+                                def mark_save_attempt():
+                                    context['campaign_transition_source'] = 'schedule'
+                                    context['campaign_transition_destination'] = 'preview'
+                                context['schedule_draft_preview'] = await schedule.save_and_preview(target, mark_save_attempt)
+                                context['last_verified_step'] = outcome = 'DRAFT_PREVIEW_VERIFIED'
+                            else:
+                                context['operator_aborted'] = True
+                                outcome = 'SCHEDULE_DRAFT_SAVE_DECLINED' if decision == 'no' else 'SCHEDULE_DRAFT_APPROVAL_TIMEOUT'
                 else:
                     return {'status': 'PAGE1_TRANSITION_UNRESOLVED', 'authentication_verified': False,
                             'failure': {'code': context['audience_transition']['status'], 'owner': 'uncertain_write',
@@ -2557,8 +2696,16 @@ async def run_human_assisted(args):
                 if failure and context['authorization'].manual_form_test and 'evaluation' not in context:
                     context['evaluation'] = setup_stopped_verdict(tools, failure)
                     trace.agent_event('setup_attempt_verdict', role='observer', **context['evaluation'])
+                screenshot = None
+                if (getattr(args, 'capture_audience_failure', False) and through_audience
+                        and failure and not failure.get('unsafe') and tools.stage == 'audience'):
+                    from browser.diagnostics import ScreenshotDiagnostics
+                    result_pixels = await ScreenshotDiagnostics(browser).compare({}, {}, enabled=True, campaign_tools=tools)
+                    screenshot = {key: result_pixels[key] for key in ('status','screenshot_status',
+                        'screenshot_reference','screenshot_sha256') if key in result_pixels}
+                    trace.agent_event('campaign_failure_screenshot', role='observer', **screenshot)
                 context['pre_cleanup_evidence'] = save_setup_evidence(artifact_dir, trace,
-                    tools, context.get('evaluation'), failure)
+                    tools, context.get('evaluation'), failure, screenshot=screenshot)
         except Exception as error:
             trace.agent_event('setup_evidence_unavailable', role='observer', error=type(error).__name__)
         finally:
@@ -2567,7 +2714,8 @@ async def run_human_assisted(args):
                 from browser.inspection import inspection_hold
                 try:
                     last_step = context.get('last_verified_step', '')
-                    page_label = next((name.title() for name in ('audience', 'content', 'schedule')
+                    page_label = 'Preview' if last_step == 'DRAFT_PREVIEW_VERIFIED' else next(
+                        (name.title() for name in ('audience', 'content', 'schedule')
                                        if last_step.startswith(name.upper())), 'Setup')
                     if last_step != 'AUDIENCE_VISIBLE' or through_schedule:
                         await context['tools'].protect()
@@ -2595,9 +2743,10 @@ async def run_human_assisted(args):
                     findings=[evaluation] if evaluation else [], login_verification=context.get('verification'),
                     human_assisted=True, review_kind=review_kind,
                     authentication_verified=context.get('route')=='VERIFIED',task_skill_read=True)
-                review_state={'status':final_state.get('status','BLOCKED'),'stage':'setup','failure':failed}
+                review_stage = context['tools'].stage if through_audience or through_schedule else 'setup'
+                review_state={'status':final_state.get('status','BLOCKED'),'stage':review_stage,'failure':failed}
                 try:
-                    trace.agent_stage='setup';trace.agent_phase='teacher'
+                    trace.agent_stage=review_stage;trace.agent_phase='teacher'
                     trace.agent_event('graph_route',role='controller',source='setup_evaluator',
                         destination='teacher',reason=failed.get('code', review_kind))
                     context['teacher']=openai_model('teacher',settings,trace,budget)
@@ -2637,7 +2786,9 @@ async def run_human_assisted(args):
         'evidence_configuration':evidence_status,
         'login_mode':'operator_confirmed' if operator_confirmed_mode else 'operator' if operator_login else 'doer',
         'last_verified_step': (context['last_verified_step'] if context.get('last_verified_step') in
-                               {'ALL_SETUP_FIELDS_VERIFIED', 'AUDIENCE_VISIBLE'} else
+                               {'ALL_SETUP_FIELDS_VERIFIED','AUDIENCE_VISIBLE','AUDIENCE_FIELDS_VERIFIED',
+                                'CONTENT_VISIBLE','CONTENT_TEMPLATE_VERIFIED','CONTENT_FIELDS_VERIFIED','SCHEDULE_VISIBLE',
+                                'SCHEDULE_FIELDS_VERIFIED','DRAFT_PREVIEW_VERIFIED'} else
                                'SETUP_FIELD_READBACK' if (context.get('evaluation') or {}).get('verified_fields')
                                else context.get('last_verified_step', 'NOT_ESTABLISHED')),
         'login_doer_outcome': ({key: (context.get('login_result') or {}).get(key)

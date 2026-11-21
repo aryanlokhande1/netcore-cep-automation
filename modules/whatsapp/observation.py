@@ -353,36 +353,144 @@ CAMPAIGN_PICKER_HELPERS = r'''
    !e.closest('[aria-hidden=true],[inert]');
  const campaignHeadings=(stage)=>{
    const heading='h1,h2,h3,h4,h5,h6,[role=heading],legend';
-   const nodes=[...document.querySelectorAll(heading)].filter(campaignVisible);
-   const include=nodes.filter(e=>/^target audience$/i.test(campaignText(e.innerText)));
-   const exclude=nodes.filter(e=>/^(exclude|excluded|exclusion)( audience| contacts| lists[ /]+segments)?( \(optional\))?$/i.test(campaignText(e.innerText)));
-   return stage==='audience'?{include_audience:include,exclude_audience:exclude}:
-     {template:nodes.filter(e=>/^select template$/i.test(campaignText(e.innerText)))};
+   const nodes=[...document.querySelectorAll(heading+',div,p,span,label,strong')]
+     .filter(e=>campaignVisible(e)&&!e.closest('mat-expansion-panel,[role=listbox]'));
+   const named=pattern=>{
+     const matching=nodes.filter(e=>pattern.test(campaignText(e.innerText)));
+     return matching.filter(e=>!matching.some(other=>other!==e&&e.contains(other)));
+   };
+   return stage==='audience'?{
+     include_audience:named(/^target audience\s*:?$/i),
+     exclude_audience:named(/^(exclude|excluded|exclusion)( audience| contacts| lists?\s*\/\s*segments?)?( \(optional\))?\s*:?\s*\*?$/i)
+   }:{template:named(/^select template\s*:?$/i)};
  };
  const campaignPickerOwners=stage=>{
    const headings=campaignHeadings(stage), owners={};
-   const anchors=Object.values(headings).flat();
    for(const [field,rows] of Object.entries(headings)){
-     if(rows.length!==1)continue;
-     const anchor=rows[0];
-     for(let p=anchor.parentElement,depth=0;p&&p!==document.body&&depth<8;p=p.parentElement,depth++){
-       if(anchors.some(n=>n!==anchor&&p.contains(n)))break;
-       const triggers=[...p.querySelectorAll('mat-select[role=combobox],[role=combobox],select')]
-          .filter(campaignVisible);
-       if(triggers.length>1)break;
-       if(triggers.length===1){owners[field]=triggers[0];break;}
+     const opposite=Object.entries(headings).filter(([name])=>name!==field).flatMap(([,nodes])=>nodes);
+     const candidates=new Set();
+     for(const anchor of rows){
+       for(let p=anchor.parentElement,depth=0;p&&p!==document.body&&depth<8;p=p.parentElement,depth++){
+         if(opposite.some(n=>p.contains(n)))break;
+         const triggers=[...p.querySelectorAll('mat-select[role=combobox],[role=combobox],select')]
+            .filter(campaignVisible);
+         if(triggers.length>1)break;
+         if(triggers.length!==1)continue;
+         if(field==='exclude_audience'){
+           const includeMode=[...p.querySelectorAll('input[type=radio]')].some(e=>
+             [...e.labels].some(n=>campaignVisible(n)&&/^lists\s*\/\s*segments$/i.test(campaignText(n.innerText))));
+           if(includeMode)break;
+         }
+         candidates.add(triggers[0]);break;
+       }
+     }
+     if(candidates.size===1)owners[field]=[...candidates][0];
+   }
+   // Netcore uses the same List / Segment label in both sections. Only
+   // the include picker belongs to the checked mode radio's native form.
+   if(stage==='audience'&&!owners.include_audience){
+     const modes=[...document.querySelectorAll('input[type=radio]:checked')].filter(e=>
+       [...e.labels].some(label=>campaignVisible(label)&&/^lists\s*\/\s*segments$/i.test(campaignText(label.innerText))));
+     const form=modes.length===1?modes[0].form:null;
+     if(campaignVisible(form)){
+       const triggers=[...form.querySelectorAll('mat-select[role=combobox]')].filter(campaignVisible);
+       if(triggers.length===1&&triggers[0]!==owners.exclude_audience)owners.include_audience=triggers[0];
      }
    }
    return owners;
  };
- const campaignOptionExact=(row,wanted)=>{
+
+ const campaignAudienceSummary=()=>{
+   const panels=[...document.querySelectorAll('mat-expansion-panel')].flatMap(panel=>{
+     const headers=[...panel.querySelectorAll('mat-expansion-panel-header')]
+       .filter(h=>h.closest('mat-expansion-panel')===panel&&campaignVisible(h)&&
+         /^audience(?: summary)?$/i.test(campaignText(h.innerText)));
+     return headers.length===1?[{panel,header:headers[0]}]:[];
+   });
+   return panels.length===1?panels[0]:null;
+ };
+
+ const campaignPreviewCandidates=()=>{
+   const preview=/^(?:(?:template|message|whatsapp|live) )?preview$/i;
+   const region='[role=region][aria-label],section[aria-label],aside[aria-label],'+
+     '[id="template-preview"],[id="message-preview"],.template-preview,.message-preview,whatsapp-template-preview';
+   const labels='h2,h3,h4,h5,h6,[role=heading],mat-card-title,div,span,p,strong';
+   const named=[...document.querySelectorAll(region)].filter(e=>campaignVisible(e)&&
+     (!e.getAttribute('aria-label')||preview.test(campaignText(e.getAttribute('aria-label')))));
+   const labelMatches=[...document.querySelectorAll(labels)].filter(e=>campaignVisible(e)&&
+     !e.closest('button,[role=button],[role=listbox],mat-expansion-panel-header')&&preview.test(campaignText(e.innerText)));
+   const headings=labelMatches.filter(e=>!labelMatches.some(other=>other!==e&&e.contains(other)));
+   return {named,headings};
+ };
+ const campaignPreviewRegion=()=>{
+   const {named,headings}=campaignPreviewCandidates();
+   if(named.length)return named.length===1?named[0]:null;
+   if(headings.length!==1)return null;
+   const heading=headings[0];
+   for(let n=heading.parentElement,depth=0;n&&n!==document.body&&depth<5;n=n.parentElement,depth++){
+     if(n.querySelector('form,input,select,[role=combobox],mat-expansion-panel-header'))return null;
+     if(n.matches('section,aside,mat-card,[role=region]')||
+        [...n.children].some(c=>c!==heading&&!c.contains(heading)&&campaignVisible(c)&&
+          (campaignText(c.innerText)||c.querySelector('img,video'))))return n;
+   }
+   return null;
+ };
+ const campaignOptionExact=(row,wanted,field)=>{
    if(!campaignVisible(row)||row.closest('[data-create],[aria-disabled=true],[inert]'))return false;
    const exact=n=>campaignText(n.innerText??n.textContent)===wanted;
    if(exact(row))return true;
+   if(field==='template'){
+     const cells=[...row.querySelectorAll('td,[role=cell]')].filter(campaignVisible);
+     if(cells.length)return exact(cells[0]);
+     const textElements=[...row.querySelectorAll('span,div,p')]
+       .filter(e=>campaignVisible(e)&&!e.closest('mat-icon,svg,[aria-hidden=true],[role=checkbox]')&&
+         campaignText(e.innerText)&&e.closest('[role=option]')===row&&
+         ![...e.children].some(c=>campaignVisible(c)&&campaignText(c.innerText)));
+     return !!textElements.length&&exact(textElements[0]);
+   }
    const leaves=[...row.querySelectorAll('td,[role=cell],span,div')]
       .filter(n=>campaignVisible(n)&&exact(n)&&n.closest('[role=option]')===row&&
           !n.closest('input,button,[role=checkbox],a[href]'));
    return leaves.filter(n=>!leaves.some(other=>n!==other&&n.contains(other))).length===1;
+ };
+
+ const campaignSelection=(trigger)=>{
+   if(!campaignVisible(trigger))return null;
+   const displays=[...trigger.querySelectorAll('mat-select-trigger,.mat-mdc-select-value,.mat-select-value')]
+     .filter(campaignVisible);
+   const roots=displays.filter(n=>!displays.some(other=>other!==n&&other.contains(n)));
+   if(roots.length>1)return null;
+   const root=roots[0]||trigger;
+   const popupIds=((trigger.getAttribute('aria-controls')||'')+' '+(trigger.getAttribute('aria-owns')||''))
+     .split(/\s+/).filter(Boolean);
+   const inPopup=n=>popupIds.some(id=>document.getElementById(id)?.contains(n));
+   const selectedRegion=n=>campaignVisible(n)&&!inPopup(n)&&!n.closest('input,a[href]');
+   const removeMarkers=e=>[...e.querySelectorAll('mat-icon,svg,button,span,i')]
+     .filter(n=>chipPainted(n)&&['\u00d7','\u2715','x'].some(mark=>chipActionCue(n,mark)));
+   const labelWithoutRemove=e=>{
+     const markers=removeMarkers(e);
+     const leaves=markers.filter(n=>!markers.some(other=>n!==other&&n.contains(other)));
+     return leaves.length===1?campaignText(collectChipLabel(e,leaves[0])):null;
+   };
+   // Angular's selected chips live in a listbox inside the trigger. The
+   // separately owned popup is the results listbox.
+   const chips=[...root.querySelectorAll('mat-chip,mat-chip-row,mat-chip-option')].filter(selectedRegion);
+   const tight=chips.filter(e=>!chips.some(other=>other!==e&&e.contains(other)));
+   if(tight.length){
+     const labels=tight.map(labelWithoutRemove);
+     return labels.every(Boolean)?labels:null;
+   }
+   const inferred=[...root.querySelectorAll('span,div')].filter(selectedRegion).flatMap(e=>{
+     const label=labelWithoutRemove(e);
+     return label&&!/\bselect up\s*to .*lists?\s*\/\s*segments?/i.test(label)?[{e,label}]:[];
+   });
+   const exact=inferred.filter(x=>!inferred.some(y=>y.e!==x.e&&x.e.contains(y.e)));
+   if(exact.length)return exact.map(x=>x.label);
+   const actual=campaignText(root.innerText??root.textContent);
+   const placeholder=/^(?:list\s*\/\s*segment|select(?:\s+up\s*to\s+\d+)?\s+(?:list|lists)\s*\/\s*segments?)$/i;
+   if(!actual||placeholder.test(actual))return [];
+   if(removeMarkers(root).length||/\bselect up\s*to .*lists?\s*\/\s*segments?/i.test(actual))return null;
+   return [actual];
  };
  const campaignSelected=(trigger,wanted)=>{
    if(!campaignVisible(trigger))return false;
@@ -496,6 +604,8 @@ V2_EXPLORE=r'''(s=>{''' + V2_LABEL_HELPERS + TAG_CHIP_HELPERS + CAMPAIGN_PICKER_
  for(const [field,b] of Object.entries(bindings)){
    const c=unique(b.selector);if(!c||!scope.contains(c))continue;
    candidates.push(c);
+   const search=unique(b.search_selector);
+   if(search)candidates.push(search);
    for(const id of ((c.getAttribute('aria-controls')||'')+' '+(c.getAttribute('aria-owns')||'')).split(/\s+/).filter(Boolean)){
     const popup=document.getElementById(id);
     if(popup)candidates.push(...popup.querySelectorAll('[role=option],input[type=search],[role=searchbox]'));
@@ -518,7 +628,7 @@ V2_EXPLORE=r'''(s=>{''' + V2_LABEL_HELPERS + TAG_CHIP_HELPERS + CAMPAIGN_PICKER_
    const text=norm(e.getAttribute('aria-label')||e.labels?.[0]?.textContent||e.textContent);
    const expected=field?s.values[field]:null;
    let exact=typeof expected==='string'&&(norm(e.value)===expected||norm(e.textContent)===expected);
-   if(s.campaign_walkthrough&&part==='option'&&campaignPickerField(field)) exact=campaignOptionExact(e,expected);
+   if(s.campaign_walkthrough&&part==='option'&&campaignPickerField(field)) exact=campaignOptionExact(e,expected,field);
    if(s.current_field==='tag'&&part==='option'&&field==='tag'){
      const chip=chipParts(e,'+');
      if(chip.action)tagChipCounts.with_unique_add++;
@@ -557,7 +667,12 @@ V2_EXPLORE=r'''(s=>{''' + V2_LABEL_HELPERS + TAG_CHIP_HELPERS + CAMPAIGN_PICKER_
  }
  const advance=[...scope.querySelectorAll('button,[role=button],input[type=submit]')].filter(e=>visible(e)&&!forbidden(e)&&
    (s.stage==='schedule'?['save and preview','save & preview'].includes(norm(e.textContent||e.value).toLowerCase()):norm(e.textContent||e.value).toLowerCase()==='next step'));
- const previews=[...scope.querySelectorAll('[role=region]')].filter(e=>visible(e)&&norm(e.getAttribute('aria-label')).toLowerCase()==='template preview');
+ const previews=s.campaign_walkthrough&&s.stage==='content'?[campaignPreviewRegion()].filter(Boolean):
+   [...scope.querySelectorAll('[role=region]')].filter(e=>visible(e)&&norm(e.getAttribute('aria-label')).toLowerCase()==='template preview');
+ const candidatesForPreview=s.campaign_walkthrough&&s.stage==='content'?campaignPreviewCandidates():null;
+ const previewEvidence=candidatesForPreview?{named_regions:candidatesForPreview.named.length,
+   visible_preview_labels:candidatesForPreview.headings.length,bound_regions:previews.length,
+   visible_iframes:[...document.querySelectorAll('iframe')].filter(visible).length}:null;
  const previewIdentity=s.stage==='preview'?[...scope.querySelectorAll('h1,h2,h3,[role=heading]')].filter(e=>visible(e)&&
    ['preview','campaign preview','whatsapp preview','whatsapp campaign preview'].includes(norm(e.textContent).toLowerCase())):[];
  const setupHeading=[...scope.querySelectorAll('h1,h2,h3,h4,[role=heading]')].filter(e=>visible(e)&&
@@ -580,6 +695,12 @@ V2_EXPLORE=r'''(s=>{''' + V2_LABEL_HELPERS + TAG_CHIP_HELPERS + CAMPAIGN_PICKER_
        checked:typeof e.checked==='boolean'?e.checked:
          e.getAttribute('aria-checked')==='true'?true:e.getAttribute('aria-checked')==='false'?false:null};
    }):null;
+
+ const audienceSections=s.stage==='audience'?{
+   exclude_heading_count:campaignHeadings('audience').exclude_audience.length,
+   include_owned:!!pickerOwners.include_audience,exclude_owned:!!pickerOwners.exclude_audience,
+   summary_panel_bound:!!campaignAudienceSummary()
+ }:null;
  const audiencePickers=s.stage==='audience'&&scopeProven?
    [...scope.querySelectorAll('select,[role=combobox]')].filter(visible).slice(0,12).map(e=>{
      const container=e.closest('mat-form-field,[role=group]')||e.parentElement;
@@ -593,7 +714,7 @@ V2_EXPLORE=r'''(s=>{''' + V2_LABEL_HELPERS + TAG_CHIP_HELPERS + CAMPAIGN_PICKER_
              popup_owner_declared:!!(e.getAttribute('aria-controls')||e.getAttribute('aria-owns')),
              disabled:e.matches(':disabled,[aria-disabled=true]')||!!e.closest('[aria-disabled=true],[inert]')};
    }):[];
- return {ga_row_evidence:gaRows,audience_picker_evidence:audiencePickers,stage_visible:!!declared||(scopeProven&&(fieldCandidates.length>0||
+ return {ga_row_evidence:gaRows,audience_picker_evidence:audiencePickers,audience_section_evidence:audienceSections,stage_visible:!!declared||(scopeProven&&(fieldCandidates.length>0||
    setupHeading.length===1&&setupForm)),nodes,truncated:candidateNodes.length>nodeLimit,
    scoped_option_evidence:s.current_field==='tag'?{...scopedOptions,tag_chips:tagChipCounts}:scopedOptions,
    scope_selector:scopeProven?selector(scope):null,field_candidates:fieldCandidates,
@@ -605,11 +726,11 @@ V2_EXPLORE=r'''(s=>{''' + V2_LABEL_HELPERS + TAG_CHIP_HELPERS + CAMPAIGN_PICKER_
      audience_radio_group:!!group,audience_labelled_controls:namedAudienceControls.length},
    preview_identity_selector:previewIdentity.length===1?selector(previewIdentity[0]):null,
    advance_selector:scopeProven&&advance.length===1?selector(advance[0]):null,
-   content_preview_selector:scopeProven&&previews.length===1?selector(previews[0]):null,discovered_bindings:bindings};
+   content_preview_evidence:previewEvidence,content_preview_selector:scopeProven&&previews.length===1?selector(previews[0]):null,discovered_bindings:bindings};
 })(SETTINGS)'''
 
 
-async def explore_v2(browser,ui,payload,stage,*,reviewed_fields=None,reviewed_stages=None,diagnostic=False,strategy=None,current_field=None,campaign_walkthrough=False):
+async def explore_v2(browser,ui,payload,stage,*,reviewed_fields=None,reviewed_stages=None,diagnostic=False,strategy=None,current_field=None,campaign_walkthrough=False,audience_option=None):
     if diagnostic:
         if ui is not None or payload is not None:
             raise ValueError('Diagnostic observation cannot receive campaign context')
@@ -639,6 +760,9 @@ async def explore_v2(browser,ui,payload,stage,*,reviewed_fields=None,reviewed_st
     settings['strategy']=strategy or 'semantic'
     settings['current_field'] = current_field
     settings['campaign_walkthrough'] = campaign_walkthrough
+    if audience_option is not None:
+        field, value = audience_option
+        settings['values'][field] = value
     if strategy=='semantic':
         # Deterministic SDK accessibility snapshot, not Stagehand's separately
         # metered model-backed observe API. Never expose its tree/URL map.

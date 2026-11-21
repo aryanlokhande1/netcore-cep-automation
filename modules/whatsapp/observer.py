@@ -1,9 +1,10 @@
 """Goal interpretation plus separately queried deterministic state. No action tools."""
+import asyncio
 import json
 from modules.whatsapp.contract import GoalFinding,STAGE_FIELDS,V2Stop
 
 
-async def deterministic_readback(tools,fields=None):
+async def deterministic_readback(tools,fields=None,*,operator_details=False):
     """Read actual properties, not the Doer's node descriptions or success report."""
     document=await tools.protect()
     fields=STAGE_FIELDS[tools.stage] if fields is None else fields
@@ -18,11 +19,17 @@ async def deterministic_readback(tools,fields=None):
     settings['tag_chip_mode'] = getattr(tools, 'page1_tag_chip_mode', False)
     settings['campaign_walkthrough'] = getattr(tools, 'campaign_verified_stage', None) == tools.stage
     settings['campaign_stage'] = tools.stage
+    settings['audience_option'] = getattr(tools, 'audience_option', None)
+    settings['operator_details'] = operator_details
+    if tools.stage == 'audience' and settings['campaign_walkthrough']:
+        for key in ('include_audience', 'exclude_audience'):
+            if key in available:
+                settings['expected'][key] = tools.payload.audience_values(key)
     script=r'''(s=>{''' + TAG_CHIP_HELPERS + CAMPAIGN_PICKER_HELPERS + r'''
       const one=q=>{if(!q)return null;const a=document.querySelectorAll(q);return a.length===1?a[0]:null};
       const visible=e=>!!e&&e.getClientRects().length>0&&getComputedStyle(e).visibility!=='hidden';
       const norm=x=>String(x??'').replace(/\s+/g,' ').trim();
-      const stage=one(s.stage),result={};
+      const stage=one(s.stage),result={},sets={};
       for(const [key,b] of Object.entries(s.fields)){
         const e=one(b.selector),wanted=s.expected[key];let ok=false;
         if(e&&stage&&stage.contains(e)&&visible(e)){
@@ -58,7 +65,17 @@ async def deterministic_readback(tools,fields=None):
             ok=chips.length===1&&(chipText(chips[0].innerText??chips[0].textContent)===wanted||
                 ['?','?','?'].some(marker=>chipParts(chips[0],marker).label===wanted));
           }else if(s.campaign_walkthrough&&campaignPickerField(key)&&b.kind==='combobox'){
-            ok=campaignPickerOwners(s.campaign_stage)[key]===e&&campaignSelected(e,wanted);
+            const owned=campaignPickerOwners(s.campaign_stage)[key]===e;
+            if(Array.isArray(wanted)){
+              const actual=owned?campaignSelection(e):null;
+              const one=s.audience_option?.[0]===key?s.audience_option[1]:null;
+              const exact=actual!==null&&actual.length===wanted.length&&new Set(actual).size===actual.length&&
+                actual.every(v=>wanted.includes(v));
+              ok=one?!!actual&&actual.includes(one):exact;
+              sets[key]={complete_match:exact,count:actual?.length??null,matched:actual?.filter(v=>wanted.includes(v))||[],
+                unexpected_count:actual?.filter(v=>!wanted.includes(v)).length??null};
+              if(s.operator_details)sets[key].terminal_unexpected=actual?.filter(v=>!wanted.includes(v))||[];
+            }else ok=owned&&e.getAttribute('aria-expanded')!=='true'&&campaignSelected(e,wanted);
           }else if(b.kind==='combobox'||b.kind==='selected_text'){
             const selected=one(b.selected_selector);
             // A reviewed selected-state selector must identify a value display or
@@ -69,10 +86,12 @@ async def deterministic_readback(tools,fields=None):
         }
         result[key]=ok;
       }
-      return {stage_visible:visible(stage),fields:result};
+      return {stage_visible:visible(stage),fields:result,selected_sets:sets};
     })(SETTINGS)'''
     state=await tools.browser.page.evaluate(script.replace('SETTINGS',json.dumps(settings)))
     state['fields']={k:state['fields'].get(k,False) for k in fields}
+    terminal_details = {key: proof.pop('terminal_unexpected') for key, proof in state.get('selected_sets', {}).items()
+                        if 'terminal_unexpected' in proof}
     if 'schedule_datetime' in available and tools.ui.fields['schedule_datetime'].kind=='datetime_split':
         b=tools.ui.fields['schedule_datetime'];value=tools.payload.scheduled_local()
         parts={'date':b.date_selector,'time':b.time_selector,'expected_date':value.strftime(b.date_format),'expected_time':value.strftime(b.time_format)}
@@ -84,7 +103,7 @@ async def deterministic_readback(tools,fields=None):
             r'''(q=>{const a=document.querySelectorAll(q), e=a.length===1?a[0]:null;
               if(!e||!e.getClientRects().length||getComputedStyle(e).visibility!=='visible')return false;
               if(e.matches('[aria-busy=true]')||e.querySelector('[aria-busy=true],mat-spinner,[role=progressbar]'))return false;
-              const text=(e.innerText||'').replace(/^\s*template preview\s*/i,'').trim();
+              const text=(e.innerText||'').replace(/^\s*(?:(?:template|message|whatsapp|live) )?preview\s*/i,'').trim();
               return !!text&&!/^(loading|no template selected|select (a )?template)[ .?]*$/i.test(text)||
                 [...e.querySelectorAll('img')].some(img=>img.complete&&img.naturalWidth>0&&img.getClientRects().length);
             })('''+json.dumps(tools.ui.content_preview_selector)+')')
@@ -121,6 +140,8 @@ async def deterministic_readback(tools,fields=None):
         else:
             prior = getattr(tools, 'last_independent_readback', {})
             tools.last_independent_readback = {**state, 'fields': {**prior.get('fields', {}), **state['fields']}}
+    if operator_details:
+        state = {**state, 'terminal_unexpected': terminal_details}
     return state
 
 
@@ -174,3 +195,73 @@ async def observe_goal(tools,model,trace,budget,previous,*,force_interpretation=
         interpretation=interpretation.model_copy(update={'status':'UNKNOWN','recoverable':False,'blocker_category':'recognition'})
     trace.agent_event('observer_interpretation',role='observer',verdict=interpretation.model_dump(),checks=fresh,evidence_refs=ids)
     return interpretation,fresh
+
+
+async def verify_audience_exclusion_summary(tools, *, reveal=False):
+    from browser.observed_control import observed_node, stagehand_locator
+    from modules.whatsapp.observation import CAMPAIGN_PICKER_HELPERS
+
+    page = tools.browser.page
+    document = await tools.protect()
+    settings = {'values': tools.payload.audience_values('exclude_audience')}
+    expression = (r"""(s=>{""" + CAMPAIGN_PICKER_HELPERS + r"""
+       const owned=campaignAudienceSummary();
+       if(!owned)return {status:'AUDIENCE_SUMMARY_NOT_BOUND'};
+       const {panel,header}=owned;
+       const unique=q=>document.querySelectorAll(q).length===1;
+       const selector=e=>{
+         if(e.id){const q='#'+CSS.escape(e.id);if(unique(q))return q;}
+         const parts=[];
+         for(let n=e;n&&parts.length<24;n=n.parentElement){
+           const same=n.parentElement?[...n.parentElement.children].filter(x=>x.tagName===n.tagName):[n];
+           parts.unshift(n.tagName.toLowerCase()+':nth-of-type('+(same.indexOf(n)+1)+')');
+           const q=parts.join(' > ');if(unique(q))return q;
+         }
+         return null;
+       };
+       if(header.getAttribute('aria-expanded')==='false')
+           return {status:'AUDIENCE_SUMMARY_COLLAPSED',header:selector(header)};
+       const leaves=[...panel.querySelectorAll('span,li,dd,td,p,div')].filter(e=>campaignVisible(e)&&
+         !header.contains(e)&&!e.closest('form,[role=listbox],input,button,[contenteditable=true]')&&
+         ![...e.children].some(c=>campaignVisible(c)&&campaignText(c.innerText)));
+       const exclusionLabel=/^(exclude|excluded|exclusion)( audience| contacts| lists?(?:\s*\/\s*segments?)?)?\s*:?\s*$/i;
+       const rows=leaves.filter(e=>exclusionLabel.test(campaignText(e.innerText)));
+       const text=leaves.map(e=>campaignText(e.innerText));
+       const inline=leaves.map(e=>campaignText(e.innerText)).filter(value=>
+         /^(exclude|excluded|exclusion)( audience| contacts)?\s*:/i.test(value))
+         .map(value=>value.slice(value.indexOf(':')+1).trim()).filter(Boolean);
+       const adjacent=rows.length===1?rows.map(e=>e.nextElementSibling)
+         .filter(e=>e&&campaignVisible(e)&&panel.contains(e)&&!e.matches('button,input'))
+         .map(e=>campaignText(e.innerText)).filter(Boolean):[];
+       const rowValues=[...new Set([...inline,...adjacent])];
+       const matches=s.values.filter(value=>(rowValues.length?rowValues:text).includes(value));
+       const explicitEmpty=rowValues.some(value=>/^(none|no exclusions|no excluded (audience|lists|segments))$/i.test(value));
+       const ok=s.values.length?matches.length===s.values.length&&(!rowValues.length||rowValues.length===s.values.length):
+         explicitEmpty&&rowValues.length===1;
+       const status=ok?'MATCH':rowValues.length?'AUDIENCE_SUMMARY_EXCLUSION_CONFLICT':
+         'AUDIENCE_SUMMARY_EXCLUSION_UNOBSERVED';
+       return {status,expected_count:s.values.length,matched_count:matches.length,explicit_empty:explicitEmpty,
+               exclusion_label_count:rows.length,exclusion_value_regions:rowValues.length};
+    })(SETTINGS)""").replace('SETTINGS',json.dumps(settings))
+    facts = await page.evaluate(expression)
+    if facts.get('status') == 'AUDIENCE_SUMMARY_COLLAPSED' and reveal and facts.get('header'):
+        selector = facts['header']
+        identity = await observed_node(tools.browser, selector)
+        target = await stagehand_locator(tools.browser, selector, identity)
+        if await tools.protect() != document or (await page.evaluate(expression)) != facts:
+            raise V2Stop('AUDIENCE_SUMMARY_TARGET_CHANGED', owner='recognition')
+        await target.click(timeout=tools.operation_timeout_ms)
+        for _ in range(5):
+            if await tools.protect() != document:
+                raise V2Stop('AUDIENCE_SUMMARY_DOCUMENT_CHANGED', owner='browser', unsafe=True)
+            facts = await page.evaluate(expression)
+            if facts.get('status') == 'MATCH':
+                break
+            await asyncio.sleep(.2)
+    if await tools.protect() != document:
+        raise V2Stop('AUDIENCE_SUMMARY_DOCUMENT_CHANGED', owner='browser', unsafe=True)
+    facts.pop('header', None)
+    tools.browser.trace.agent_event('campaign_audience_summary_readback', role='observer', **facts)
+    if facts.get('status') == 'AUDIENCE_SUMMARY_EXCLUSION_CONFLICT':
+        raise V2Stop(facts['status'], owner='recognition')
+    return facts

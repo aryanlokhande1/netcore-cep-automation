@@ -814,7 +814,8 @@ class V2BrowserTools:
             if(/publish|activate|send\s+(test|now)|finish\s+later/i.test(t))return deny(e);
             if((/next\s+step|save|schedule\s+now/i.test(t)||n.type==='submit')&&!window.__netcoreV2Advance){
               const grant=window.__netcoreV2Page1Next;
-              if(grant?.control===n&&!grant.clicked&&/^next\s+step$/i.test(t))grant.clicked=true;
+              const exact=grant?.kind==='draft-preview'?/^save\s+(and|&)\s+preview$/i.test(t):/^next\s+step$/i.test(t);
+              if(grant?.control===n&&!grant.clicked&&exact)grant.clicked=true;
               else deny(e);
             }
           },true);
@@ -935,6 +936,9 @@ class V2BrowserTools:
         campaign_stage = getattr(self, 'campaign_verified_stage', None)
         if campaign_stage == self.stage and campaign_stage in {'audience', 'content'}:
             extra['campaign_walkthrough'] = True
+            current_option = getattr(self, 'audience_option', None)
+            if current_option:
+                extra['audience_option'] = current_option
         field = getattr(self, 'page1_current_field', None)
         if field is not None:
             extra['current_field'] = field
@@ -1002,8 +1006,11 @@ class V2BrowserTools:
             if self.stage=='schedule' and not self.ui.preview_selector:patch['preview_selector']=data['advance_selector']
             elif self.stage in {'setup','audience','content'} and self.stage not in self.ui.next_selectors:
                 patch['next_selectors']={**self.ui.next_selectors,self.stage:data['advance_selector']}
-        if self.stage=='content' and data.get('content_preview_selector') and not self.ui.content_preview_selector:
-            patch['content_preview_selector']=data['content_preview_selector']
+        if self.stage == 'content':
+            if getattr(self, 'campaign_verified_stage', None) == 'content':
+                patch['content_preview_selector'] = data.get('content_preview_selector')
+            elif data.get('content_preview_selector') and not self.ui.content_preview_selector:
+                patch['content_preview_selector'] = data['content_preview_selector']
         self.ui=self.ui.model_copy(update=patch)
         self.references={};public=[]
         for node in data['nodes']:
@@ -1035,6 +1042,9 @@ class V2BrowserTools:
             result['ga_row_evidence'] = data['ga_row_evidence']
         if self.stage == 'audience' and result['unresolved_fields']:
             result['audience_picker_evidence'] = data.get('audience_picker_evidence', [])
+            result['audience_section_evidence'] = data.get('audience_section_evidence', {})
+        if self.stage == 'content':
+            result['content_preview_evidence'] = data.get('content_preview_evidence', {})
         if data.get('scoped_option_evidence') is not None:
             result['scoped_option_evidence'] = data['scoped_option_evidence']
         result['binding_failures'] = {
@@ -1250,17 +1260,35 @@ class V2BrowserTools:
             loc = await self.audience_radio_label(entry)
         if entry.get('field'):
             binding=await self.verify_binding(entry['field'])
-            owned=await self.browser.page.evaluate(r'''(s=>{
-              const one=q=>{const a=document.querySelectorAll(q);return a.length===1?a[0]:null};
+            stage_template = (self.stage == 'content' and entry['field'] == 'template'
+                              and getattr(self, 'campaign_verified_stage', None) == 'content')
+            owned=await self.browser.page.evaluate(r"""(s=>{
+              const one=q=>{const a=q?document.querySelectorAll(q):[];return a.length===1?a[0]:null};
               const c=one(s.control),e=one(s.target),scope=one(s.scope);
-              if(!c||!e||!scope||!scope.contains(c))return false;
-              if(s.part==='control')return e===c;
-              const ids=((c.getAttribute('aria-controls')||'')+' '+(c.getAttribute('aria-owns')||'')).split(/\s+/).filter(Boolean);
+              const report=(ok,reason,extra={})=>s.template?{ok,reason,...extra}:ok;
+              if(!c||!e||!scope||!scope.contains(c))
+                return report(false,'CONTROL_OR_SCOPE_UNBOUND',{control:!!c,target:!!e,scope:!!scope});
+              if(s.part==='control')return report(e===c,'CONTROL_IDENTITY');
+              const links=n=>((n.getAttribute('aria-controls')||'')+' '+(n.getAttribute('aria-owns')||'')).split(/\s+/).filter(Boolean);
+              const ids=[...new Set(links(c))];
+              const panels=ids.map(id=>document.getElementById(id)).filter(panel=>panel?.contains(e));
+              const search=s.template?one(s.search):null;
               const owners=[...document.querySelectorAll('[aria-controls],[aria-owns]')].filter(n=>n!==c&&
-                ((n.getAttribute('aria-controls')||'')+' '+(n.getAttribute('aria-owns')||'')).split(/\s+/).some(id=>ids.includes(id)));
-              return !owners.length&&ids.some(id=>document.getElementById(id)?.contains(e));
-            })(SETTINGS)'''.replace('SETTINGS',json.dumps({'control':binding.selector,'target':entry['selector'],
-                'scope':self.ui.stage_selectors[self.stage],'part':entry['part']})))
+                links(n).some(id=>ids.includes(id)));
+              // The already-owned Search input can expose a relationship to
+              // results fed by that input. It is not an independent picker.
+              const auxiliary=search&&search.matches('input,textarea,[role=searchbox]')&&
+                panels.some(panel=>panel.contains(search))&&owners.includes(search);
+              const competing=owners.filter(n=>!auxiliary||n!==search);
+              return report(!competing.length&&(s.template?panels.length===1:panels.length>0),
+                competing.length?'COMPETING_POPUP_OWNER':panels.length!==1?'TARGET_NOT_IN_UNIQUE_OWNED_PANEL':'OWNED_PANEL',
+                {part:s.part,panel_count:panels.length,competing_owner_count:competing.length,owned_search_delegate:!!auxiliary});
+            })(SETTINGS)""".replace('SETTINGS',json.dumps({'control':binding.selector,'target':entry['selector'],
+                'scope':self.ui.stage_selectors[self.stage],'part':entry['part'],'search':binding.search_selector,
+                'template':stage_template})))
+            if stage_template:
+                self.browser.trace.agent_event('content_template_target_ownership', role='observer', **owned)
+                owned = owned['ok']
             if owned is not True:raise V2Stop('CURRENT_FIELD_OWNERSHIP_UNPROVEN',owner='recognition')
         return entry,loc
 
@@ -1672,8 +1700,17 @@ class V2BrowserTools:
                             # Structural discovery changes how the control is
                             # located, not how the widget receives its first click.
                             prior = self.failed_approaches.get((self.stage, field), set())
-                            event['method'] = 'dom' if f'{field}:native' in prior else 'native'
+                            known_mat_select = (field in {'waba','template'} and
+                                                getattr(self, 'page1_current_field', None) == field and
+                                                entry.get('tag') == 'MAT-SELECT')
+                            retry = 'keyboard' if known_mat_select else 'dom'
+                            event['method'] = retry if f'{field}:native' in prior else 'native'
+                        if (data.action == 'click' and field == 'template' and entry['part'] == 'search'
+                                and getattr(self, 'campaign_verified_stage', None) == 'content'):
+                            event['method'] = 'native'
                         event['approach']=':'.join((str(field),event['method']))
+                        if field == 'template' and entry['part'] == 'search':
+                            event['approach'] += ':search'
                         if data.field and (data.field not in STAGE_FIELDS[self.stage] or entry.get('field')!=data.field):raise V2Stop('FIELD_REFERENCE_SCOPE_MISMATCH',owner='authorization')
                         from modules.whatsapp.contract import validate_v2_capability
                         if data.action in {'click','type','search','select','options','verify'}:
@@ -1792,14 +1829,38 @@ class V2BrowserTools:
                                 event['valid_approach']=True;event['attempted']=True;await self.browser.page.click(x,y)
                             elif data.action=='click':
                                 event['valid_approach']=True;event['attempted']=True
-                                if event['method']=='dom':
+                                if event['method']=='keyboard':
+                                    view = await self.browser.page.evaluate(r'''(q=>{
+                                      const nodes=document.querySelectorAll(q), e=nodes.length===1?nodes[0]:null;
+                                      if(e?.tagName!=='MAT-SELECT'||e.getAttribute('role')!=='combobox'||
+                                         e.tabIndex<0||e.closest('[aria-disabled=true],[inert]')||
+                                         !e.getClientRects().length||getComputedStyle(e).visibility!=='visible')return null;
+                                      if(e.getAttribute('aria-expanded')==='true')return 'ALREADY_OPEN';
+                                      e.focus({preventScroll:true});
+                                      return document.activeElement===e?'FOCUSED':null;
+                                    })('''+json.dumps(entry['selector'])+')')
+                                    if view not in {'FOCUSED','ALREADY_OPEN'}:
+                                        event['attempted']=False
+                                        raise V2Stop(field.upper()+'_KEYBOARD_FOCUS_NOT_VERIFIED',owner='recognition')
+                                    if view == 'FOCUSED':
+                                        await self.protect()
+                                        if (await observed_node(self.browser,entry['selector']) != entry['identity']
+                                                or await self.browser.page.evaluate(
+                                                    '(q=>document.activeElement===document.querySelector(q)&&'
+                                                    'document.activeElement.getAttribute("aria-expanded")!=="true")('
+                                                    +json.dumps(entry['selector'])+')') is not True):
+                                            event['attempted']=False
+                                            raise V2Stop(field.upper()+'_KEYBOARD_TARGET_CHANGED',owner='recognition')
+                                        await self.browser.page.key_press('Enter')
+                                    else:
+                                        event['attempted']=False
+                                elif event['method']=='dom':
                                     await loc.send_click_event(bubbles=True,cancelable=True,composed=True,
                                         timeout=getattr(self,'operation_timeout_ms',3000))
                                 else:await loc.click(timeout=getattr(self,'operation_timeout_ms',3000))
                             if data.action=='click' and self.ui.fields[field].kind=='native_select':self.native_open_attempts.add((self.stage,field))
-                            if data.action=='click' and field=='waba':self.waba_opened=True
                             if data.action in {'type','search'}:
-                                value=getattr(self.payload,field)
+                                value=self.expected_value(field)
                                 if self.ui.fields[field].kind=='checkbox':
                                     checked=await self.browser.page.evaluate('(s=>{const e=document.querySelector(s.q);if(!e)return null;' +
                                         'if(e.type==="checkbox")return e.checked;const role=e.getAttribute("role");' +
@@ -1848,8 +1909,8 @@ class V2BrowserTools:
                                 if manual:
                                     result['observation'] = current_observation
                             elif data.action=='search':
-                                if await loc.input_value(timeout=2000)!=getattr(self.payload,field):raise V2Stop('SEARCH_READBACK_FAILED',owner='recognition')
-                                event['progress']=before_search!=getattr(self.payload,field)
+                                if await loc.input_value(timeout=2000)!=self.expected_value(field):raise V2Stop('SEARCH_READBACK_FAILED',owner='recognition')
+                                event['progress']=before_search!=self.expected_value(field)
                                 self.preparations[(self.stage,field)]='SEARCHED_EXISTING'
                                 result={'search_text_verified':True,'selection_verified':False}
                             elif data.action=='click' and (self.ui.fields[field].kind=='text' or entry['part']=='search'):
@@ -1857,11 +1918,20 @@ class V2BrowserTools:
                                 result={'focused':focused is True,'selection_verified':False}
                                 if not focused:raise V2Stop('INPUT_FOCUS_NOT_VERIFIED',owner='recognition')
                             else:
-                                fresh=await self.observe()
-                                opened=any(c['field']==field and c['part']=='control' and c['expanded'] for c in fresh['controls'])
-                                options=any(c['field']==field and c['part']=='option' for c in fresh['controls'])
+                                attempts = 3 if field in {'waba','template'} and getattr(self, 'page1_current_field', None) == field else 1
+                                for poll in range(attempts):
+                                    if poll:
+                                        await asyncio.sleep(.25)
+                                    fresh=await self.observe()
+                                    opened=any(c['field']==field and c['part']=='control' and c['expanded'] for c in fresh['controls'])
+                                    options=any(c['field']==field and c['part']=='option' for c in fresh['controls'])
+                                    if opened or options:
+                                        break
                                 event['progress']=(opened and not entry['expanded']) or (options and not entry['expanded'])
-                                if opened or options:self.preparations[(self.stage,field)]='DROPDOWN_OPENED'
+                                if opened or options:
+                                    self.preparations[(self.stage,field)]='DROPDOWN_OPENED'
+                                if field=='waba' and (opened or options or self.ui.fields[field].kind=='native_select'):
+                                    self.waba_opened=True
                                 result={'interaction_returned':True,'dropdown_open_verified':opened or options,
                                     'selection_verified':False,'observation':fresh}
                                 if not (opened or options):
@@ -1924,6 +1994,15 @@ class V2BrowserTools:
                 event['trace_ref']=self.browser.trace.agent_event('browser_action',role='doer',tool='browser_action',
                     invocation_id=call,event_id=event['id'],**{k:v for k,v in event.items() if k!='id'})
 
+    def expected_value(self, field):
+        current = getattr(self, 'audience_option', None)
+        if current and self.stage == 'audience' and current[0] == field:
+            if current[1] not in self.payload.audience_values(field):
+                from modules.whatsapp.contract import V2Stop
+                raise V2Stop('AUDIENCE_OPTION_NOT_IN_APPROVED_PAYLOAD', owner='authorization')
+            return current[1]
+        return getattr(self.payload, field)
+
     async def inspect_options(self,entry):
         from modules.whatsapp.contract import V2Stop
         field=entry.get('field')
@@ -1932,7 +2011,7 @@ class V2BrowserTools:
         binding=self.ui.fields[field]
         if binding.kind=='native_select':
             options=await self.browser.page.evaluate('(s=>{const a=document.querySelectorAll(s.q);if(a.length!==1||a[0].tagName!=="SELECT")return null;'+
-                'return [...a[0].options].map((o,i)=>({index:i,exact:o.value===s.v||o.textContent.trim()===s.v,enabled:!o.disabled,existing:true}));})('+json.dumps({'q':binding.selector,'v':getattr(self.payload,field)})+')')
+                'return [...a[0].options].map((o,i)=>({index:i,exact:o.value===s.v||o.textContent.trim()===s.v,enabled:!o.disabled,existing:true}));})('+json.dumps({'q':binding.selector,'v':self.expected_value(field)})+')')
             if options is None:raise V2Stop('NATIVE_SELECT_NOT_CURRENT',owner='recognition')
             return {'options':options,'selection_verified':False,'control_reference':next((r for r,d in self.references.items() if d['field']==field and d['part']=='control'),None)}
         return {'options':[{'reference':r,'exact':d['exact'],'existing':not d['create']} for r,d in self.references.items()
@@ -1940,7 +2019,7 @@ class V2BrowserTools:
 
     async def select(self,entry,loc,field,event):
         from modules.whatsapp.contract import V2Stop
-        value=getattr(self.payload,field);binding=self.ui.fields[field]
+        value=self.expected_value(field);binding=self.ui.fields[field]
         if field=='waba' and not self.waba_opened:raise V2Stop('EXPLICIT_WABA_OPEN_REQUIRED',owner='recognition')
         if binding.kind=='radio':
             exact=await self.browser.page.evaluate('(s=>{const e=document.querySelector(s.q);if(!e)return false;'+
@@ -2014,7 +2093,7 @@ class V2BrowserTools:
                   if(!c||!e||campaignPickerOwners(s.stage)[s.field]!==c)return false;
                   const ids=((c.getAttribute('aria-controls')||'')+' '+(c.getAttribute('aria-owns')||'')).split(/\s+/).filter(Boolean);
                   const rows=new Set(ids.flatMap(id=>[...document.getElementById(id)?.querySelectorAll('[role=option]')||[]]));
-                  const matches=[...rows].filter(row=>campaignOptionExact(row,s.value));
+                  const matches=[...rows].filter(row=>campaignOptionExact(row,s.value,s.field));
                   return matches.length===1&&matches[0]===e&&e.getAttribute('aria-selected')!=='true';
                 })(SETTINGS)'''
                 settings = {'control': binding.selector, 'option': entry['selector'], 'field': field,

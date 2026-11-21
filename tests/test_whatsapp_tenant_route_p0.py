@@ -223,3 +223,34 @@ async def test_transition_revokes_inflight_controller_certificate_before_journal
         await tools._advance()
     tools.write_journal.assert_not_called()
     locator.click.assert_not_awaited()
+
+
+def test_setup_landing_trace_omits_query_and_opaque_route_values():
+    from modules.whatsapp.destination import landing_route_parts
+    parts = landing_route_parts('https://tenant.example/admin/path?token=private#step?code=private')
+    assert parts == {'hostname': 'tenant.example', 'pathname': '/admin/path', 'fragment': '[redacted]'}
+
+
+def test_setup_landing_wait_cannot_cross_host_or_tenant_boundary():
+    from modules.whatsapp.contract import SETUP_URL
+    from modules.whatsapp.destination import classify_setup_page, same_tenant_landing_path
+    admin = SETUP_URL.split('/campaign/', 1)[0]
+    assert same_tenant_landing_path(admin)
+    assert same_tenant_landing_path(admin + '/other')
+    assert not classify_setup_page(admin + '/other')['route_match']
+    assert not same_tenant_landing_path(admin + '-other')
+    assert not same_tenant_landing_path(admin + '/%2e%2e/other')
+    assert not same_tenant_landing_path(admin.replace('https://', 'http://'))
+    assert not same_tenant_landing_path(admin + '?private=1')
+
+
+def test_exact_observed_preview_route_is_admitted_only_for_preview_stage():
+    from modules.whatsapp.contract import SETUP_URL
+    from modules.whatsapp.destination import campaign_step_route, classify_setup_page
+    preview = SETUP_URL.split('/create/', 1)[0] + '/preview?campaign=opaque'
+    assert campaign_step_route(preview, 'preview')
+    assert not campaign_step_route(preview, 'schedule')
+    assert not classify_setup_page(preview)['route_match']
+    assert not campaign_step_route(preview.replace('tprappin2r', 'other-host'), 'preview')
+    assert not campaign_step_route(preview.replace('bajajfinservmarket', 'wrong'), 'preview')
+    assert not campaign_step_route(preview.replace('/preview?', '/preview-extra?'), 'preview')
