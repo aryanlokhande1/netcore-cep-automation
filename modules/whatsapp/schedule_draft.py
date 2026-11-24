@@ -1,9 +1,10 @@
 """Bounded Schedule picker and separately approved draft preview."""
 import asyncio
 import calendar
+import hashlib
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 from browser.observed_control import observed_node, stagehand_locator
 from modules.whatsapp.contract import V2Stop
@@ -148,7 +149,8 @@ SCHEDULE_VIEW = r"""(s=>{""" + V2_LABEL_HELPERS + CAMPAIGN_DOM + SCHEDULE_DOM + 
 def _parse_display(text):
     text = re.sub(r'\s+', ' ', str(text or '')).strip()
     for pattern in ('%b %d, %Y %I:%M %p', '%B %d, %Y %I:%M %p',
-                    '%b %d, %Y %H:%M', '%Y-%m-%d %H:%M', '%Y-%m-%dT%H:%M', '%B %d, %Y %H:%M'):
+                    '%b %d, %Y %H:%M', '%Y-%m-%d %H:%M', '%Y-%m-%dT%H:%M', '%B %d, %Y %H:%M',
+                    '%d %B %Y %I:%M %p', '%d %b %Y %I:%M %p', '%d %B %Y %H:%M', '%d %b %Y %H:%M'):
         try:
             return datetime.strptime(text, pattern)
         except ValueError:
@@ -170,6 +172,49 @@ def _summary_matches(lines, expected, zone):
     return False
 
 
+
+class DraftApproval:
+    sequence = (('setup','audience'), ('audience','content'), ('content','schedule'), ('schedule','preview'))
+
+    def __init__(self, tools, path, digest, document):
+        self.binding = tools.operator_setup_binding
+        self.login = tools.operator_login_binding
+        self.payload = tools.payload
+        self.path = path
+        self.digest = digest
+        self.document = document
+        self.index = 0
+        self.pending = False
+
+    def require(self, tools, stage):
+        if (self.index >= len(self.sequence) or self.pending or self.sequence[self.index][0] != stage
+                or tools.stage != stage):
+            raise V2Stop('DRAFT_APPROVED_ACTION_SEQUENCE_CHANGED', owner='authorization', unsafe=True)
+        if (tools.operator_setup_binding is not self.binding or tools.browser.setup_binding is not self.binding
+                or tools.operator_login_binding is not self.login or tools.payload is not self.payload
+                or tools.operator_approved_setup_document != self.document
+                or not self.login.same_owning_session(tools.browser.guard)):
+            raise V2Stop('DRAFT_APPROVAL_SESSION_OR_PAYLOAD_CHANGED', owner='authorization', unsafe=True)
+        try:
+            current = hashlib.sha256(self.path.read_bytes()).hexdigest()
+        except OSError:
+            current = None
+        if current != self.digest:
+            raise V2Stop('DRAFT_APPROVED_PAYLOAD_DIGEST_CHANGED', owner='authorization', unsafe=True)
+
+    def begin(self, tools, source, destination):
+        self.require(tools, source)
+        if self.sequence[self.index] != (source,destination):
+            raise V2Stop('DRAFT_APPROVED_TRANSITION_CHANGED', owner='authorization', unsafe=True)
+        self.pending = True
+
+    def complete(self, destination):
+        if not self.pending or self.sequence[self.index][1]!=destination:
+            raise V2Stop('DRAFT_DESTINATION_EVIDENCE_CHANGED', owner='authorization', unsafe=True)
+        self.index += 1
+        self.pending = False
+
+
 class ScheduleDraft:
     def __init__(self, tools):
         self.tools = tools
@@ -189,6 +234,9 @@ class ScheduleDraft:
         raise V2Stop(code, owner='recognition')
 
     async def view(self):
+        grant = getattr(self.tools, 'draft_approval', None)
+        if grant is not None:
+            grant.require(self.tools, 'schedule')
         doc = await self.tools.protect()
         if self.document is None:
             self.document = doc
@@ -376,7 +424,7 @@ class ScheduleDraft:
                       exact_save_controls=facts['save_count'], preview_only_controls=facts['preview_only_count'])
         return facts['save']
 
-    async def save_and_preview(self, approved_target, mark_attempt):
+    async def save_and_preview(self, approved_target, mark_attempt, *, source_run=None, require_saved_configuration=False):
         from browser.observed_control import protected_document
 
         self.tools.payload.check_schedule()
@@ -396,6 +444,7 @@ class ScheduleDraft:
         url = await self.page.url()
         self.saved_attempt = True
         mark_attempt()
+        saved_at = datetime.now(timezone.utc)
         self.browser.trace.agent_event('schedule_draft_save_started', role='controller', operator_approved=True)
         settings = {'q':selector,'url':url}
         click_script = r"""(s=>{
@@ -415,46 +464,105 @@ class ScheduleDraft:
                                        click_result='DISPATCHED' if clicked is True else 'BLOCKED' if clicked is False else 'UNCERTAIN')
         if clicked is False:
             self.stop('SCHEDULE_DRAFT_SAVE_CONTROL_NOT_ACTIONABLE')
-        observation = {'preview_visible':False, 'campaign_match':False, 'schedule_match':False, 'draft_marker':False}
-        for _ in range(15):
-            stop=self.tools.operator_setup_stop() or self.tools.operator_login_binding.stop_code
-            active=await self.browser.browser.context.active_page()
-            if (stop or not active or active.page_id!=self.page.page_id
-                    or protected_document(self.browser)!=self.document):
-                break
-            current_url=await self.page.url()
-            tree=await self.browser.guard.send('Page.getFrameTree',session=self.document[1])
-            frame=tree.get('frameTree',{}).get('frame',{})
-            if (cdp_frame_url(frame)!=current_url or frame.get('id')!=self.document[4]
-                    or (frame.get('loaderId') or None)!=self.document[5]):
-                await asyncio.sleep(.2)
+        try:
+            return await self._verify_saved_draft(source_run, saved_at,
+                                                  require_saved_configuration=require_saved_configuration)
+        except V2Stop:
+            raise
+        except Exception as error:
+            self.browser.trace.agent_event('schedule_draft_verification_interrupted', role='observer',
+                                           error=type(error).__name__)
+            raise V2Stop('SCHEDULE_DRAFT_SAVE_OUTCOME_UNVERIFIED_NO_RETRY',
+                         owner='uncertain_write', unsafe=True) from error
+
+    async def _verify_saved_draft(self, source_run, saved_at, *, require_saved_configuration=False):
+        from urllib.parse import parse_qs, urlsplit
+        from browser.observed_control import protected_document
+        from modules.whatsapp.browser_baseline import reject_security_negatives
+        from modules.whatsapp.destination import navigation_url_difference
+        from modules.whatsapp.reconciliation import DETAIL, campaign_ax_signals, reconcile_campaign
+
+        login = self.tools.operator_login_binding
+        observation = {'preview_visible': False, 'campaign_match': False, 'schedule_match': False,
+                       'draft_marker': False, 'campaign_id': None}
+        view_check = {'preview_route': False, 'document_coherent': False, 'url_differences': []}
+        route_candidate_id = None
+        settings = json.dumps({'name': self.tools.payload.campaign_name})
+        for _ in range(20):
+            stop = self.tools.operator_setup_stop() or login.stop_code
+            active = await self.browser.browser.context.active_page()
+            if (stop or not active or active.page_id != self.page.page_id
+                    or not login.same_owning_session(self.browser.guard)):
+                raise V2Stop(stop or 'SCHEDULE_DRAFT_PREVIEW_TAB_CHANGED', owner='browser', unsafe=True)
+            self.browser.budget()
+            before = protected_document(self.browser)
+            if before[:3] != self.document[:3]:
+                raise V2Stop('SCHEDULE_DRAFT_PREVIEW_TAB_CHANGED', owner='browser', unsafe=True)
+            current_url = await self.page.url()
+            tree = await self.browser.guard.send('Page.getFrameTree', session=before[1])
+            frame = tree.get('frameTree', {}).get('frame', {})
+            differences = navigation_url_difference(cdp_frame_url(frame), current_url)
+            coherent = (not differences and frame.get('id') == before[4]
+                        and (frame.get('loaderId') or None) == before[5])
+            is_preview = campaign_step_route(current_url, 'preview')
+            view_check = {'preview_route': is_preview, 'document_coherent': coherent,
+                          'url_differences': differences, 'same_document': before == self.document}
+            if not coherent or not is_preview:
+                await asyncio.sleep(.35)
                 continue
-            is_preview=campaign_step_route(current_url,'preview')
-            preview = await self.page.evaluate(r"""(()=>{
-              const visible=e=>e.getClientRects().length&&getComputedStyle(e).visibility==='visible'&&!e.closest('[aria-hidden=true]');
-              const n=x=>String(x??'').replace(/\s+/g,' ').trim();
-              const roots=[...document.querySelectorAll('[role=dialog],mat-dialog-container,main,[role=main]')].filter(visible);
-              const panels=roots.filter(r=>[...r.querySelectorAll('h1,h2,h3,[role=heading]')]
-                .some(h=>visible(h)&&/^(campaign |whatsapp campaign )?preview$/i.test(n(h.innerText))));
-              const unique=panels.filter(p=>!panels.some(q=>p!==q&&p.contains(q)));
-              if(unique.length!==1)return null;
-              const text=unique[0].innerText;
-              return {text,labels:[...unique[0].querySelectorAll('span,dd,div,p,h2,h3')]
-                .filter(e=>visible(e)&&!e.children.length).map(e=>n(e.innerText)).slice(0,240)};
-            })()""")
-            if protected_document(self.browser)!=self.document or await self.page.url()!=current_url:
+            await reject_security_negatives(self.browser)
+            preview = await self.page.evaluate(DETAIL.replace('SETTINGS', settings))
+            if (protected_document(self.browser) != before or await self.page.url() != current_url
+                    or self.tools.operator_setup_stop() or login.stop_code):
+                await asyncio.sleep(.35)
                 continue
-            if preview:
-                observation={'preview_visible':True,'campaign_match':self.tools.payload.campaign_name in preview['labels'],
-                    'schedule_match':_summary_matches([preview['text']],self.expected,self.zone),
-                    'draft_marker':any(re.fullmatch(r'(draft|draft saved|saved as draft)',x,re.I) for x in preview['labels'])}
-                if all(observation.values()):
-                    if is_preview:
-                        self.tools.stage=self.tools.campaign_verified_stage='preview'
-                    self.browser.trace.agent_event('schedule_saved_preview_verified', role='observer',
-                        **observation,date=self.expected.date().isoformat(),time=self.expected.strftime('%H:%M'),timezone=self.zone)
-                    return observation
+            params = parse_qs(urlsplit(current_url).query)
+            route_ids = {value for field in ('campaign_id', 'campaignId', 'camp_id', 'campaignid', 'id')
+                         for value in params.get(field, []) if re.fullmatch(r'[A-Za-z0-9_-]{1,80}', value)}
+            ui_ids = set(preview.get('ids', ()))
+            all_ids = route_ids | ui_ids
+            route_candidate_id = next(iter(all_ids)) if len(all_ids) == 1 else None
+            dates = {_parse_display(value) for value in preview.get('dates', ())} - {None}
+            zones = set(preview.get('zones', ()))
+            statuses = {value.casefold() for value in preview.get('statuses', ())}
+            observation = {'preview_visible': bool(preview.get('preview_visible')),
+                           'draft_badge': bool(preview.get('draft_badge')),
+                           'campaign_match': bool(preview.get('campaign_name_visible')),
+                           'campaign_id': route_candidate_id if len(ui_ids) == 1 else None,
+                           'schedule_match': (preview.get('send_later_label_visible') is True
+                               and dates == {self.expected.replace(tzinfo=None)}
+                               and bool(zones) and all(_zone_matches(zone, self.zone) for zone in zones)),
+                           'draft_marker': statuses == {'draft'}}
+            if ((observation['preview_visible'] or observation['draft_badge']) and observation['campaign_match']
+                    and observation['campaign_id'] and observation['schedule_match'] and observation['draft_marker']):
+                if require_saved_configuration:
+                    break
+                self.tools.stage = self.tools.campaign_verified_stage = 'preview'
+                date = next(iter(dates))
+                zone = sorted(zones)[0]
+                out = {**observation, 'netcore_status': 'Draft', 'date': date.date().isoformat(),
+                       'time': date.strftime('%H:%M'), 'timezone': zone, 'campaign_name': self.tools.payload.campaign_name,
+                       'id_source': 'PREVIEW_UI', 'status_source': 'PREVIEW_UI', 'schedule_source': 'PREVIEW_UI'}
+                self.browser.trace.agent_event('schedule_saved_preview_verified', role='observer', **out)
+                return out
             await asyncio.sleep(.35)
+        accessibility = (await campaign_ax_signals(self.browser, self.document[1])
+                         if view_check['preview_route'] and view_check['document_coherent'] else None)
+        self.browser.trace.agent_event('schedule_draft_preview_incomplete', role='observer',
+                                       click_attempted=True, accessibility=accessibility, **view_check, **observation)
+        if source_run is not None and not (self.tools.operator_setup_stop() or login.stop_code):
+            if not login.same_owning_session(self.browser.guard):
+                raise V2Stop('SCHEDULE_DRAFT_LOOKUP_SESSION_CHANGED', owner='browser', unsafe=True)
+            await self.browser.guard.send('Target.activateTarget', {'targetId': login.target})
+            self.browser.page = login.page
+            await login.require_current(self.browser)
+            evidence = await reconcile_campaign(self.browser, login, self.tools.payload, source_run, saved_at,
+                                                campaign_id=route_candidate_id,
+                                                require_configuration=require_saved_configuration)
+            expected_status = 'PERSISTED_DRAFT_MATCH' if require_saved_configuration else 'PERSISTED_SCHEDULE_MATCH'
+            if evidence['status'] == expected_status:
+                return evidence
+            observation['reconciliation_status'] = evidence['status']
         self.browser.trace.agent_event('schedule_draft_outcome_unresolved', role='observer',
                                        click_attempted=True, **observation)
         raise V2Stop('SCHEDULE_DRAFT_SAVE_OUTCOME_UNVERIFIED_NO_RETRY', owner='uncertain_write', unsafe=True)

@@ -9,7 +9,7 @@ from uuid import uuid4
 from time import monotonic
 from langchain_core.tools import tool
 from app.safety import require_live_browser,require_fixture_browser
-from browser.observed_control import observed_node,protected_document,stagehand_locator
+from browser.observed_control import lost_observed_node,observed_node,protected_document,stagehand_locator
 from modules.whatsapp.authorization import MutationGrant,confirm_scoped_mutation
 from modules.whatsapp.contract import validate_capability,reference_schema,resolved_reference_action,CapabilityError,SETUP_URL,VALUES,LABELS,ORDER,FIELD_FACTS,SetupStop
 from modules.whatsapp.dom import INSTALL_GUARD
@@ -942,6 +942,13 @@ class V2BrowserTools:
         field = getattr(self, 'page1_current_field', None)
         if field is not None:
             extra['current_field'] = field
+        ga_fields = getattr(self, 'ga_setup_fields', None)
+        mcp_ga_scope = self.stage == 'setup' and getattr(self, 'mcp_ga_scope', False)
+        if mcp_ga_scope:
+            extra['ga_scope'] = True
+        if ga_fields:
+            extra['ga_fields'] = ga_fields
+            extra['ga_adjacent_keys'] = getattr(self, 'ga_adjacent_keys', False)
         data=await explore_v2(self.browser,self.ui,self.payload,self.stage,
             reviewed_fields=self.reviewed_fields,reviewed_stages=self.reviewed_stages,**extra)
         recognition_attempts=1
@@ -964,13 +971,26 @@ class V2BrowserTools:
         # Bind only unambiguous actual labelled controls in an observed form scope.
         # This never supplies or approves a record endpoint/tenant mapping.
         from modules.whatsapp.contract import FieldBinding,ReviewedUI,STAGE_FIELDS
+        active_fields = ga_fields or STAGE_FIELDS[self.stage]
         updates=dict(self.ui.fields);scopes=dict(self.ui.stage_selectors)
         if self.stage not in self.reviewed_stages:scopes.pop(self.stage,None)
         if self.stage=='preview':self.preview_identity=None
         candidates=data.get('field_candidates',[])
         current_proofs={}
+
+        async def identify(selector, part, field=None, reference=None):
+            try:
+                return await observed_node(self.browser, selector)
+            except SetupStop as error:
+                if self.stage == 'content' and getattr(self, 'page1_current_field', None) == 'template':
+                    from hashlib import sha256
+                    self.browser.trace.agent_event('content_template_binding_failed', role='observer',
+                        code=error.code, field=field, part=part, reference=reference,
+                        selector_sha256=sha256(selector.encode()).hexdigest(), node_disappeared=lost_observed_node(error))
+                raise
+
         if data.get('scope_selector') and data.get('stage_visible'):
-            try:scope_identity=await observed_node(self.browser,data['scope_selector'])
+            try:scope_identity=await identify(data['scope_selector'], 'form_scope')
             except SetupStop as error:
                 if error.code!='CONTROL_IDENTITY_NOT_UNIQUE':raise
                 # An ambiguous recognizer result is evidence, never a write grant.
@@ -979,9 +999,9 @@ class V2BrowserTools:
             scopes[self.stage]=data['scope_selector']
             if self.stage=='preview' and data.get('preview_identity_selector'):
                 q=data['preview_identity_selector']
-                self.preview_identity={'selector':q,'identity':await observed_node(self.browser,q)}
+                self.preview_identity={'selector':q,'identity':await identify(q, 'preview')}
             for field,raw_binding in data.get('discovered_bindings',{}).items():
-                if field not in STAGE_FIELDS[self.stage] or field in self.reviewed_fields:continue
+                if field not in active_fields or field in self.reviewed_fields:continue
                 matching=[c for c in candidates if c['field']==field]
                 if len(matching)!=1 or matching[0]['selector']!=raw_binding['selector']:continue
                 try:
@@ -989,7 +1009,7 @@ class V2BrowserTools:
                     proposed=ReviewedUI.model_validate({**self.ui.model_dump(),'fields':{**updates,field:binding},'stage_selectors':scopes})
                 except ValueError:continue
                 updates=dict(proposed.fields)
-                try:identity=await observed_node(self.browser,binding.selector)
+                try:identity=await identify(binding.selector, 'field_control', field)
                 except SetupStop as error:
                     if error.code!='CONTROL_IDENTITY_NOT_UNIQUE':raise
                     updates.pop(field,None)
@@ -999,7 +1019,7 @@ class V2BrowserTools:
                 current_proofs[field]={'identity':identity,
                     'scope_identity':scope_identity,'field_label':matching[0]['field_label'],'stage':self.stage,
                     'strategy':strategy or 'semantic'}
-        self.observed_bindings={k:v for k,v in self.observed_bindings.items() if k not in STAGE_FIELDS[self.stage]}
+        self.observed_bindings={k:v for k,v in self.observed_bindings.items() if k not in active_fields}
         self.observed_bindings.update(current_proofs)
         patch={'fields':updates,'stage_selectors':scopes}
         if data.get('advance_selector') and data.get('stage_visible'):
@@ -1015,7 +1035,7 @@ class V2BrowserTools:
         self.references={};public=[]
         for node in data['nodes']:
             reference=uuid4().hex
-            try:identity=await observed_node(self.browser,node['selector'])
+            try:identity=await identify(node['selector'], node['part'], node.get('field'), reference)
             except SetupStop as error:
                 if error.code!='CONTROL_IDENTITY_NOT_UNIQUE':raise
                 current_proofs.pop(node.get('field'),None)
@@ -1037,7 +1057,10 @@ class V2BrowserTools:
             'observation_counts':data.get('observation_counts',{}),
             'closed_shadow_scope_certified':data.get('closed_shadow_scope_certified',False),
             'persistence_allowed':self.authorization.persistence,
-            'unresolved_fields':[f for f in STAGE_FIELDS[self.stage] if f not in self.reviewed_fields and f not in current_proofs]}
+            'unresolved_fields':[f for f in active_fields if f not in self.reviewed_fields and f not in current_proofs]}
+        if ga_fields or mcp_ga_scope:
+            result['ga_card_evidence'] = data.get('ga_card_evidence')
+            self.ga_advanced_selector = data.get('ga_advanced_selector')
         if 'ga_tracking' in result['unresolved_fields'] and data.get('ga_row_evidence') is not None:
             result['ga_row_evidence'] = data['ga_row_evidence']
         if self.stage == 'audience' and result['unresolved_fields']:
@@ -1217,11 +1240,13 @@ class V2BrowserTools:
         if (proof['stage']!=self.stage or await observed_node(self.browser,binding.selector)!=proof['identity'] or
             await observed_node(self.browser,self.ui.stage_selectors[self.stage])!=proof['scope_identity']):
             raise V2Stop('DISCOVERED_FIELD_SCOPE_CHANGED',owner='browser',unsafe=True)
-        from modules.whatsapp.observation import V2_LABEL_HELPERS, CAMPAIGN_PICKER_HELPERS
-        label_script = r'''(s=>{''' + V2_LABEL_HELPERS + CAMPAIGN_PICKER_HELPERS + r'''
+        from modules.whatsapp.observation import V2_LABEL_HELPERS, CAMPAIGN_PICKER_HELPERS, GA_TRACKING_HELPERS
+        label_script = r'''(s=>{''' + V2_LABEL_HELPERS + CAMPAIGN_PICKER_HELPERS + GA_TRACKING_HELPERS + r'''
           const e=document.querySelector(s.q);if(!e)return false;
           const owned=s.campaign&&campaignPickerField(s.field)&&campaignPickerOwners(s.stage)[s.field]===e;
-          const text=owned?s.field.replace('_',' '):fieldLabel(e,s.strategy);
+          const scope=s.ga_scope?document.querySelector(s.ga_scope):null;
+          if(s.ga_scope&&(!scope||gaTrackingOwners(scope,s.ga_adjacent_keys).owners[s.field]!==e))return false;
+          const text=owned||scope?s.field.replace('_',' '):fieldLabel(e,s.strategy);
           const kind=e.tagName==='SELECT'?'native_select':e.type==='checkbox'||e.getAttribute('role')==='checkbox'||
             (s.field==='ga_tracking'&&e.getAttribute('role')==='switch'&&e.type!=='submit')?'checkbox':
             e.type==='radio'||e.getAttribute('role')==='radio'?'radio':
@@ -1242,6 +1267,10 @@ class V2BrowserTools:
             {'q': binding.selector, 'field': field, 'label': proof['field_label'], 'kind': binding.kind,
              'strategy': proof.get('strategy', 'semantic'), 'selected': binding.selected_selector,
              'campaign': getattr(self, 'campaign_verified_stage', None) == self.stage,
+             'ga_scope': self.ui.stage_selectors.get('setup') if (
+                 (getattr(self, 'ga_setup_fields', None) and field != 'campaign_name')
+                 or (getattr(self, 'mcp_ga_scope', False) and field == 'ga_tracking')) else None,
+             'ga_adjacent_keys': getattr(self, 'ga_adjacent_keys', False),
              'stage': self.stage})))
         if label_ok is not True:raise V2Stop('DISCOVERED_FIELD_LABEL_CHANGED',owner='recognition')
         return binding
@@ -1251,6 +1280,9 @@ class V2BrowserTools:
         await self.protect();entry=self.references.get(reference)
         if not entry or entry['stage']!=self.stage:raise V2Stop('FRESH_OBSERVED_REFERENCE_REQUIRED',owner='recognition')
         if await observed_node(self.browser,entry['selector'])!=entry['identity']:
+            if (self.stage == 'content' and getattr(self, 'campaign_verified_stage', None) == 'content'
+                    and entry.get('field') == 'template' and entry.get('part') == 'option'):
+                raise SetupStop('STALE_CONTROL_REFERENCE')
             raise V2Stop('TARGET_IDENTITY_CHANGED',owner='browser',unsafe=True)
         loc=await stagehand_locator(self.browser,entry['selector'],entry['identity'])
         if not await loc.is_visible(timeout=2000):
@@ -1323,6 +1355,9 @@ class V2BrowserTools:
 
     async def authorize_write(self):
         from modules.whatsapp.contract import V2Stop
+        draft = getattr(self, 'draft_approval', None)
+        if draft is not None:
+            draft.require(self, self.stage)
         if self.read_only or not self.authorization.edits:
             raise V2Stop('READ_ONLY_DISCOVERY_NO_CAMPAIGN_WRITE',owner='authorization')
         if self.authorization.manual_form_test:
@@ -1391,6 +1426,34 @@ class V2BrowserTools:
                                            preflight=True, status='PASSED', **checked)
             print('SETUP_WRITE_PREFLIGHT PASSED ' + json.dumps(checked), flush=True)
         return before
+
+    async def reveal_ga_advanced(self):
+        """Open only the bound Advanced disclosure on the current Setup card."""
+        from modules.whatsapp.contract import V2Stop
+        from modules.whatsapp.observation import V2_LABEL_HELPERS, GA_TRACKING_HELPERS
+
+        selector = getattr(self, 'ga_advanced_selector', None)
+        if not selector:
+            return
+        await self.authorize_write()
+        document = await self.protect()
+        scope = self.ui.stage_selectors.get('setup')
+        expression = (r'''(s=>{''' + V2_LABEL_HELPERS + GA_TRACKING_HELPERS + r'''
+            const roots=document.querySelectorAll(s.scope), controls=document.querySelectorAll(s.control);
+            return roots.length===1&&controls.length===1&&gaAdvanced(roots[0]).toggle===controls[0];
+        })(SETTINGS)''').replace('SETTINGS', json.dumps({'scope': scope, 'control': selector}))
+        identity = await observed_node(self.browser, selector)
+        locator = await stagehand_locator(self.browser, selector, identity)
+        if (await self.protect() != document or await self.browser.page.evaluate(expression) is not True
+                or await observed_node(self.browser, selector) != identity):
+            raise V2Stop('GA_ADVANCED_DISCLOSURE_CHANGED', owner='recognition')
+        await locator.click(timeout=self.operation_timeout_ms)
+        self.browser.trace.agent_event('ga_advanced_dispatched', role='controller', action='OPEN_ADVANCED')
+        for _ in range(3):
+            await asyncio.sleep(.2)
+            await self.observe(strategy='dom')
+            if (self.last_observation.get('ga_card_evidence') or {}).get('advanced_regions') == 1:
+                return
 
     async def screenshot(self):
         import struct
@@ -1603,12 +1666,13 @@ class V2BrowserTools:
         event['progress']=True
         return await self.observe_diagnostic() if diagnostic else await self.observe()
 
-    async def action(self,arguments):
+    async def action(self,arguments,*,template_rebind_available=False):
         from modules.whatsapp.contract import V2Stop, STAGE_FIELDS
         from modules.whatsapp.observer import deterministic_readback
         from time import monotonic
         diagnostic=getattr(self,'diagnostic_mode',False)
         manual=getattr(getattr(self,'authorization',None),'manual_form_test',False)
+        active_fields = getattr(self, 'ga_setup_fields', None) or STAGE_FIELDS[self.stage]
         try:
             data = self.action_schema().model_validate(arguments)
         except (ValueError, TypeError):
@@ -1619,7 +1683,7 @@ class V2BrowserTools:
             if entry and data.action in V2_CAPABILITIES:
                 field=data.field or entry.get('field')
                 try:
-                    if field not in STAGE_FIELDS[self.stage] or data.field and data.field!=entry.get('field'):
+                    if field not in active_fields or data.field and data.field!=entry.get('field'):
                         raise V2Stop('FIELD_REFERENCE_SCOPE_MISMATCH',owner='authorization')
                     binding=self.binding(field)
                     validate_v2_capability(data.action,binding.kind,entry.get('part'))
@@ -1711,10 +1775,10 @@ class V2BrowserTools:
                         event['approach']=':'.join((str(field),event['method']))
                         if field == 'template' and entry['part'] == 'search':
                             event['approach'] += ':search'
-                        if data.field and (data.field not in STAGE_FIELDS[self.stage] or entry.get('field')!=data.field):raise V2Stop('FIELD_REFERENCE_SCOPE_MISMATCH',owner='authorization')
+                        if data.field and (data.field not in active_fields or entry.get('field')!=data.field):raise V2Stop('FIELD_REFERENCE_SCOPE_MISMATCH',owner='authorization')
                         from modules.whatsapp.contract import validate_v2_capability
                         if data.action in {'click','type','search','select','options','verify'}:
-                            if field not in STAGE_FIELDS[self.stage]:raise V2Stop('CURRENT_STAGE_FIELD_REQUIRED',owner='authorization')
+                            if field not in active_fields:raise V2Stop('CURRENT_STAGE_FIELD_REQUIRED',owner='authorization')
                             validate_v2_capability(data.action,self.binding(field).kind,entry['part'])
                         if data.action in {'inspect','options'}:
                             result=await self.inspect_options(entry) if data.action=='options' else await self.control_state(data.reference,entry)
@@ -1734,8 +1798,14 @@ class V2BrowserTools:
                             result={'scrolled':event['progress']}
                         else:
                             value_change = data.action in {'type', 'select'}
-                            if manual and getattr(self, 'human_assisted_setup', False) and field in STAGE_FIELDS['setup']:
-                                preceding = STAGE_FIELDS['setup'][:STAGE_FIELDS['setup'].index(field)]
+                            if manual and getattr(self, 'human_assisted_setup', False) and self.stage == 'setup' and field in active_fields:
+                                preceding = active_fields[:active_fields.index(field)]
+                                if getattr(self, 'mcp_ga_switch_only', False):
+                                    if field != 'ga_tracking' or data.action != 'type':
+                                        raise V2Stop('MCP_GA_SWITCH_ONLY', owner='authorization')
+                                    preceding = ()
+                                if getattr(self, 'ga_setup_fields', None) and field.startswith('utm_'):
+                                    preceding = ('campaign_name', 'ga_tracking')
                                 verified = self.last_independent_readback.get('fields', {})
                                 page1_field = getattr(self, 'page1_current_field', None)
                                 if page1_field is not None:
@@ -1758,7 +1828,7 @@ class V2BrowserTools:
                                     raise V2Stop('WRITE_AND_VERIFY_CAMPAIGN_NAME_FIRST', owner='recognition')
                             if self.mutations >= 1:
                                 raise V2Stop('TURN_MUTATION_LIMIT', owner='controller')
-                            if not field or field not in STAGE_FIELDS[self.stage] or entry.get('create'):raise V2Stop('UNAUTHORIZED_CONTROL',owner='authorization')
+                            if not field or field not in active_fields or entry.get('create'):raise V2Stop('UNAUTHORIZED_CONTROL',owner='authorization')
                             if not self.authorization.edits or not entry['enabled']:raise V2Stop('CONTROL_NOT_ACTIONABLE',owner='authorization')
                             await self.authorize_write()
                             entry,loc=await self.resolve(data.reference)
@@ -1801,7 +1871,13 @@ class V2BrowserTools:
                             if event['approach'] in failed:raise V2Stop('IDENTICAL_FAILED_APPROACH_USE_DIFFERENT_METHOD',owner='recognition')
                             if data.action=='click' and self.ui.fields[field].kind=='native_select' and (self.stage,field) in self.native_open_attempts:
                                 raise V2Stop('NATIVE_OPEN_ALREADY_ATTEMPTED_INSPECT_OR_SELECT',owner='recognition')
-                            before_field=(await deterministic_readback(self,[field]))['fields'].get(field) if data.action in {'type','select'} else None
+                            before_field = None
+                            if value_change:
+                                before_state = await deterministic_readback(self, [field])
+                                before_field = before_state['fields'].get(field)
+                                if (getattr(self, 'mcp_campaign_name_write', False)
+                                        and before_state.get('observed_states', {}).get('campaign_name', {}).get('state') != 'EMPTY'):
+                                    raise V2Stop('MCP_CAMPAIGN_NAME_NO_LONGER_EMPTY', owner='authorization')
                             before_search=await loc.input_value(timeout=2000) if data.action=='search' else None
                             if manual and value_change:
                                 # A pre-write match for this field cannot survive
@@ -1948,6 +2024,18 @@ class V2BrowserTools:
                 self.terminal_unsafe = event['attempted']
                 event.update(error=self.terminal,unsafe=self.terminal_unsafe,owner=self.terminal_owner);raise
             except Exception as error:
+                option = self.references.get(data.reference) if data.action == 'select' and data.field == 'template' else None
+                if (self.stage == 'content' and getattr(self, 'campaign_verified_stage', None) == 'content'
+                        and option and option.get('part') == 'option' and not event['attempted']
+                        and (lost_observed_node(error) or isinstance(error, SetupStop)
+                             and error.code in {'STALE_CONTROL_REFERENCE', 'CONTROL_IDENTITY_NOT_UNIQUE'})):
+                    self.browser.trace.agent_event('content_template_binding_failed', role='observer',
+                        code=error.code, field='template', part='option_action', reference=data.reference,
+                        node_disappeared=lost_observed_node(error))
+                    if template_rebind_available and not self.terminal and not self.pending_write:
+                        event.update(error=error.code, owner='recognition', unsafe=False)
+                        result={'ok':False,'error':error.code,'template_rebind_required':True}
+                        return result,None
                 defect=isinstance(error,(TypeError,AttributeError,KeyError,NameError,NotImplementedError))
                 import re
                 raw_code=getattr(error,'code',None)
@@ -2103,13 +2191,16 @@ class V2BrowserTools:
                 permitted=await self.browser.page.evaluate('(s=>{const e=document.querySelector(s.q);return !!e&&e.matches(s.options)&&!e.hasAttribute("data-create")&&e.getAttribute("data-select2-tag")!=="true"&&e.textContent.trim()===s.value})('+json.dumps({'q':entry['selector'],'options':binding.option_selector,'value':value})+')')
             event['valid_approach']=True
             if permitted is not True:raise V2Stop('EXACT_EXISTING_OPTION_UNAVAILABLE',owner='recognition')
+            if field == 'template' and getattr(self, 'campaign_verified_stage', None) == 'content':
+                if await observed_node(self.browser, entry['selector']) != entry['identity']:
+                    raise SetupStop('STALE_CONTROL_REFERENCE')
             event['attempted']=True;await loc.click(timeout=getattr(self,'operation_timeout_ms',3000))
         else:raise V2Stop('EXACT_EXISTING_OPTION_REQUIRED',owner='recognition')
 
     def action_schema(self):
         from modules.whatsapp.contract import (V2Action, V2DiagnosticAction, V2DiscoveryAction,
             V2DiscoveryNoVisionAction, V2ManualAction, V2ManualNoVisionAction, V2SetupReadOnlyAction,
-            V2CampaignAudienceAction, V2CampaignContentAction)
+            V2CampaignAudienceAction, V2CampaignContentAction, V2GATrackingAction, V2GADisabledAction)
 
         if getattr(self, 'diagnostic_mode', False):
             return V2DiagnosticAction
@@ -2121,6 +2212,8 @@ class V2BrowserTools:
                 return V2SetupReadOnlyAction
             return V2DiscoveryAction if vision else V2DiscoveryNoVisionAction
         if getattr(authorization, 'manual_form_test', False):
+            if getattr(self, 'ga_setup_fields', None):
+                return V2GATrackingAction if self.payload.ga_tracking else V2GADisabledAction
             stage = getattr(self, 'stage', None)
             if (getattr(self, 'operator_setup_binding', None) is not None and
                     getattr(self, 'campaign_verified_stage', None) == stage):

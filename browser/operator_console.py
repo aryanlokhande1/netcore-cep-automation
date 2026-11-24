@@ -47,6 +47,16 @@ class OperatorConsole:
                                          prompt='Write the approved WhatsApp Setup fields? [y/N] ',
                                          receipt='Approval received')
 
+    async def confirm_mcp_campaign_name_write(self, timeout_seconds):
+        return await self._confirm_async(timeout_seconds, prompt_id='whatsapp_mcp_campaign_name_write',
+            prompt='Write only the exact Campaign Name shown above? [y/N] ',
+            receipt='Campaign Name approval received')
+
+    async def confirm_mcp_ga_write(self, enabled, timeout_seconds):
+        return await self._confirm_async(timeout_seconds, prompt_id='whatsapp_mcp_ga_write',
+            prompt=f'Approve only GA Tracking = {str(enabled).lower()} if a toggle is needed? [y/N] ',
+            receipt='GA Tracking approval received')
+
     async def confirm_tenant_route(self, observed_url, timeout_seconds):
         return await self._confirm_async(timeout_seconds, prompt_id='whatsapp_tenant_confirmation',
             prompt=f'Observed Netcore URL {observed_url}\nDoes this match your signed-in Netcore tab? [y/N] ',
@@ -70,10 +80,35 @@ class OperatorConsole:
             prompt=f'Click Next Step to submit WhatsApp {stage.title()} and open {destination.title()}? [y/N] ',
             receipt=f'{stage.title()} transition approval received')
 
+    async def confirm_draft_workflow(self, timeout_seconds):
+        return await self._confirm_async(timeout_seconds, prompt_id='whatsapp_draft_workflow_approval',
+            prompt='Apply the approved payload through Save and Preview as a draft? [y/N] ',
+            receipt='Draft workflow approval received')
+
     async def confirm_save_draft_preview(self, timeout_seconds):
         return await self._confirm_async(timeout_seconds, prompt_id='whatsapp_schedule_save_draft',
             prompt='Save this campaign draft and open Preview? [y/N] ',
             receipt='Draft save approval received')
+
+    async def confirm_campaign_list_visible(self, timeout_seconds):
+        return await self._confirm_async(timeout_seconds, prompt_id='whatsapp_reconcile_list_visible',
+            prompt='Campaigns and Search are ready. Inspect the campaign list read-only? [y/N] ',
+            receipt='Campaign list inspection confirmed')
+
+    async def confirm_unused_campaign_name(self, name, timeout_seconds):
+        return await self._confirm_async(timeout_seconds, prompt_id='whatsapp_unused_campaign_name',
+            prompt=(f'In a working Campaigns view for the confirmed tenant, search for the exact name {name!r}.\n'
+                    'Return focus to the owned Chromium tab if you changed tabs.\n'
+                    'Did you verify that exact campaign name is unused? [y/N] '),
+            receipt='Operator confirmed the campaign name is unused')
+
+    async def confirm_sms_tenant(self, tenant, timeout_seconds):
+        return await self._confirm_async(timeout_seconds, prompt_id='sms_tenant_confirmation',
+            prompt=f'Confirm Netcore tenant {tenant}? [y/N] ', receipt='')
+
+    async def confirm_sms_payload(self, summary, timeout_seconds):
+        return await self._confirm_async(timeout_seconds, prompt_id='sms_payload_confirmation',
+            prompt=summary + '\nApply this SMS payload through Preview? [y/N] ', receipt='')
 
     async def _confirm_async(self, timeout_seconds, *, prompt_id, prompt, receipt):
         if not self._custom_reader and os.name == 'nt':
@@ -115,7 +150,7 @@ class OperatorConsole:
             if key in ('\r', '\n'):
                 normalized = answer.strip().lower()
                 self._write('\n')
-                if receipt and normalized not in ('', 'y', 'n'):
+                if receipt is not None and normalized not in ('', 'y', 'n'):
                     self._record(prompt_id, 'input_invalid', started, 1, 0,
                                  valid=False, reason='EXPECTED_Y_OR_N')
                     self._write('Type y or n, then press Enter. ')
@@ -149,7 +184,10 @@ class OperatorConsole:
         if os.name == "nt":
             import msvcrt
             return msvcrt.getwch() if msvcrt.kbhit() else None
-        return sys.stdin.read(1) if select.select([sys.stdin], [], [], 0)[0] else None
+        if not select.select([sys.stdin], [], [], 0)[0]:
+            return None
+        # Buffered text reads can consume Enter while select monitors only the kernel queue.
+        return os.read(sys.stdin.fileno(), 1).decode('latin-1') or None
 
     def _write(self, text):
         self.output.write(text)

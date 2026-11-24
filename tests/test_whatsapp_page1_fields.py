@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from modules.whatsapp import page1_fields
-from modules.whatsapp.contract import PAGE1_SETUP_FIELDS
+from modules.whatsapp.contract import PAGE1_SETUP_FIELDS, SetupStop
 
 
 @pytest.mark.asyncio
@@ -85,6 +85,46 @@ async def test_owned_dropdown_uses_bound_search_and_selects_only_exact_existing_
     assert (await page1_fields.choose_dropdown(tools, 'tag', control))['fields']['tag']
     assert [call.args[2:] for call in action.await_args_list] == [
         ('search', 'tag-control'), ('select', 'exact-tag')]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['observation', 'binding', 'changed_picker', 'after_click'])
+async def test_template_rebind_is_bounded_and_never_repeats_a_click(monkeypatch, failure):
+    from browser.navigation_guard import GuardProtocolError
+
+    picker = ('document', 'trigger', 'panel')
+    snapshot = AsyncMock(return_value=picker)
+    if failure == 'changed_picker':
+        snapshot.side_effect = [picker, ('document', 'trigger', 'different-panel')]
+    monkeypatch.setattr(page1_fields, 'template_picker_identity', snapshot, raising=False)
+    monkeypatch.setattr(page1_fields.asyncio, 'sleep', AsyncMock())
+    tools = SimpleNamespace(browser=SimpleNamespace(trace=SimpleNamespace(agent_event=Mock())),
+        last_observation={}, references={}, terminal=None, pending_write=False)
+    references = iter(['unsettled', 'old-1', 'old-2', 'fresh-1', 'fresh-2'])
+
+    async def observe():
+        reference = next(references)
+        if reference == 'unsettled' and failure in {'observation', 'changed_picker'}:
+            cause = GuardProtocolError({'code': -32000, 'message': 'Could not find node with given id'})
+            raise SetupStop('CONTROL_IDENTITY_UNAVAILABLE') from cause
+        tools.last_observation = {'controls': [{'field': 'template', 'part': 'option',
+            'reference': reference, 'enabled': True, 'exact': True}], 'scoped_option_evidence': {'visible_owned': 1}}
+        tools.references = {reference: {'identity': ('panel', reference.split('-')[0])}}
+
+    tools.observe = AsyncMock(side_effect=observe)
+    outcomes = {'binding': [{'ok': False, 'template_rebind_required': True}, {'ok': True}],
+                'after_click': [{'ok': False, 'error': 'FIELD_WRITE_UNCERTAIN_NO_RETRY'}]}
+    tools.action = AsyncMock(side_effect=[(result, None) for result in outcomes.get(failure, [{'ok': True}])])
+    if failure == 'changed_picker':
+        with pytest.raises(Exception, match='CONTENT_TEMPLATE_PICKER_CHANGED'):
+            await page1_fields.choose_settled_template(tools, picker)
+        tools.action.assert_not_awaited()
+    else:
+        result = await page1_fields.choose_settled_template(tools, picker)
+        assert result['ok'] is (failure != 'after_click')
+        assert tools.action.await_count == (2 if failure == 'binding' else 1)
+        if failure == 'binding':
+            assert tools.action.await_args.args[0]['reference'] == 'fresh-2'
 
 
 def test_tag_chip_keeps_add_marker_out_of_exact_case_sensitive_label():

@@ -36,6 +36,7 @@ class InferenceBudget:
     max_requests: int = 8
     requests: int = 0
     reserve_teacher: bool = False
+    teacher_request_reserve: int = 1
     role_limits: dict | None = None
     role_requests: dict = field(default_factory=lambda:{'doer':0,'teacher':0})
 
@@ -83,7 +84,7 @@ class InferenceBudget:
         self.role_requests.setdefault(role,0)
         if self.role_limits and self.role_requests[role]>=self.role_limits[role]:
             raise RuntimeError('MODEL_BUDGET_EXHAUSTED')
-        limit=self.max_requests-(1 if self.reserve_teacher and (role=='doer' or role=='observer') else 0)
+        limit=self.max_requests-(self.teacher_request_reserve if self.reserve_teacher and role in {'doer','observer'} else 0)
         if self.requests >= limit:
             raise RuntimeError('MODEL_BUDGET_EXHAUSTED')
         self.requests += 1
@@ -250,6 +251,7 @@ class PermissionMiddleware(AgentMiddleware):
         self.trace.tool(request.tool_call['name'],self.role,'returned')
         if capture:self.trace.agent_event('tool_result',role=self.role,invocation_id=invocation,
             tool=request.tool_call['name'],status='RETURNED',duration_ms=round((monotonic()-started)*1000,3),
-            result={'browser_result_recorded_separately':True} if request.tool_call['name']=='browser_action'
+            result={'browser_result_recorded_separately':True} if request.tool_call['name'] in
+                {'browser_action','inspect_ga_setup','view_ga_setup'}
                 else self.trace.safe_tool_result(response))
         return response

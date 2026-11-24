@@ -10,7 +10,8 @@ param(
     [Parameter(ParameterSetName = 'OperatorConfirmed', Mandatory)][switch]$OperatorConfirmed,
     [Parameter(ParameterSetName = 'OperatorConfirmed')][ValidateRange(1, 3)][int]$Runs = 1,
     [Parameter(ParameterSetName = 'Capture')][switch]$CaptureLogin,
-    [Parameter(ParameterSetName = 'DashboardCapture')][switch]$CaptureDashboard
+    [Parameter(ParameterSetName = 'DashboardCapture')][switch]$CaptureDashboard,
+    [Parameter(ParameterSetName = 'Campaign', Mandatory)][ValidateSet('A', 'B')][string]$Campaign
 )
 
 $ErrorActionPreference = 'Stop'
@@ -33,7 +34,18 @@ try {
         [Environment]::SetEnvironmentVariable($name, $settings[$name], 'Process')
     }
 
-    if ($CaptureLogin -or $CaptureDashboard) {
+    if ($Campaign) {
+        $launchArguments = @(
+            '-u', '-m', 'app.cli', 'whatsapp-human-assisted',
+            '--operator-confirmed-login', '--manual-form-test', '--page1-through-audience',
+            '--through-schedule', '--save-schedule-draft', '--one-approval-draft', '--preview-draft-validation',
+            "--campaign-$($Campaign.ToLowerInvariant())-draft",
+            '--authorized-live', '--authorized-inference', '--authorized-candidate-evaluation',
+            '--login-api-budget', '8', '--task-api-budget', '15', '--total-api-budget', '23',
+            '--session-seconds', '900', '--browser-actions', '600', '--operator-review-seconds', '300',
+            '--baseline-sha256', '4fbd8076b1b2ed67d767c71abbce7e95ad6831094d128bac972f1f9697b0a809'
+        )
+    } elseif ($CaptureLogin -or $CaptureDashboard) {
         $launchArguments = @('-m', 'app.cli', 'whatsapp-login-capture', '--authorized-live')
         if ($CaptureDashboard) {
             $launchArguments += '--dashboard-only'
@@ -49,7 +61,7 @@ try {
             '-m', 'app.cli', 'whatsapp-human-assisted',
             '--authorized-live', '--authorized-inference', '--authorized-candidate-evaluation',
             '--manual-form-test', '--authorized-learning',
-            '--baseline-sha256', '2278dd124ab929bcd7aa893448d937938e3b72d8be4fd8430b85799f52e6ccd6',
+            '--baseline-sha256', '4fbd8076b1b2ed67d767c71abbce7e95ad6831094d128bac972f1f9697b0a809',
             '--login-api-budget', '6', '--task-api-budget', '17', '--total-api-budget', '24',
             '--operator-review-seconds', '300', '--session-seconds', '900', '--browser-actions', $browserActions,
             '--max-turns', '20', '--doer-tool-budget', '160', '--browser-operation-seconds', '30'

@@ -213,6 +213,8 @@ import hashlib
 import json
 
 STAGES=('setup','audience','content','schedule','preview')
+UTM_FIELDS = ('utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term')
+GA_SETUP_FIELDS = ('campaign_name', 'ga_tracking', *UTM_FIELDS)
 STAGE_FIELDS={
     'setup':('campaign_name','waba','business_number','tag','ga_tracking'),
     'audience':('audience_type','include_audience','exclude_audience'),
@@ -256,7 +258,7 @@ V2_CAPABILITIES=MappingProxyType({action:spec.targets for action,spec in V2_BROW
 V2_ACTION_ARGUMENTS=MappingProxyType({action:(spec.required,spec.allowed) for action,spec in V2_BROWSER_CONTRACT.items()})
 _V2_ACTION_NAME=Literal.__getitem__(tuple(action for action in V2_BROWSER_CONTRACT if action!='navigate'))
 _V2_DISCOVERY_ACTION_NAME=Literal.__getitem__(tuple(action for action,spec in V2_BROWSER_CONTRACT.items() if spec.read_only))
-_V2_FIELD_NAME=Literal.__getitem__(tuple(dict.fromkeys(field for fields in STAGE_FIELDS.values() for field in fields)))
+_V2_FIELD_NAME=Literal.__getitem__(tuple(dict.fromkeys((*UTM_FIELDS, *(field for fields in STAGE_FIELDS.values() for field in fields)))))
 _V2_SETUP_FIELD_NAME=Literal.__getitem__(STAGE_FIELDS['setup'])
 
 
@@ -299,6 +301,11 @@ class V2Payload(BaseModel):
     business_number:StrictStr
     tag:StrictStr
     ga_tracking:StrictBool
+    utm_source:StrictStr|None=None
+    utm_medium:StrictStr|None=None
+    utm_campaign:StrictStr|None=None
+    utm_content:StrictStr|None=None
+    utm_term:StrictStr|None=None
     audience_type:Literal['Lists/Segments']
     include_audience:StrictStr | tuple[StrictStr, ...]
     exclude_audience:StrictStr | tuple[StrictStr, ...]
@@ -314,9 +321,13 @@ class V2Payload(BaseModel):
 
     @model_validator(mode='after')
     def bounded_values(self):
-        for value in self.model_dump().values():
-            if isinstance(value,str) and (not value.strip() or len(value)>256 or any(ord(c)<32 for c in value)):
+        for field, value in self.model_dump().items():
+            if isinstance(value,str) and ((not value.strip() and not (field=='utm_content' and value==''))
+                                           or len(value)>256 or any(ord(c)<32 for c in value)):
                 raise ValueError('Invalid task value')
+        utm = [getattr(self, field) for field in UTM_FIELDS]
+        if any(value is not None for value in utm) and (not self.ga_tracking or any(value is None for value in utm)):
+            raise ValueError('UTM fields require enabled tracking and all five explicit values')
         for field in ('include_audience', 'exclude_audience'):
             values = self.audience_values(field)
             if (field == 'include_audience' and not values or len(values) > 15 or len(set(values)) != len(values)
@@ -351,12 +362,25 @@ class V2Payload(BaseModel):
         zone=ZoneInfo(self.timezone)
         return (value.replace(tzinfo=zone) if value.tzinfo is None else value.astimezone(zone))
 
-def load_v2_payload(path,*,approved_digest):
+def load_v2_payload(path,*,approved_digest,model=V2Payload):
     raw=Path(path).read_bytes()
     digest=hashlib.sha256(raw).hexdigest()
     if digest!=approved_digest:raise V2Stop('PAYLOAD_APPROVAL_DIGEST_MISMATCH',owner='authorization')
-    try:return V2Payload.model_validate_json(raw),digest
+    try:return model.model_validate_json(raw),digest
     except ValueError:raise V2Stop('INVALID_V2_PAYLOAD',owner='authorization') from None
+
+
+def ga_setup_fields(payload):
+    if payload.ga_tracking and any(getattr(payload, field) is None for field in UTM_FIELDS):
+        raise V2Stop('GA_TEST_REQUIRES_ALL_FIVE_UTM_VALUES', owner='authorization')
+    return GA_SETUP_FIELDS if payload.ga_tracking else GA_SETUP_FIELDS[:2]
+
+
+def ga_strategy_scope(payload):
+    """A fresh name changes the run approval digest, but not this experiment's scope."""
+    scope = {'origin': SETUP_URL, 'actions': 'GA_SETUP_ONLY_V1',
+             'tracking': {field: getattr(payload, field) for field in ga_setup_fields(payload)[1:]}}
+    return hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest()
 
 class FieldBinding(BaseModel):
     """Selectors are separately reviewed evidence, never model arguments."""
@@ -399,7 +423,7 @@ class ReviewedUI(BaseModel):
     def scope(self):
         target=urlsplit(SETUP_URL)
         path=urlsplit(self.record_path or '')
-        required=set().union(*map(set,STAGE_FIELDS.values()))
+        required=set().union(*map(set,STAGE_FIELDS.values()), UTM_FIELDS)
         if (self.origin!=f'{target.scheme}://{target.netloc}' or (self.tenant is not None and self.tenant!=PAGE1_TASK.tenant)
             or not set(self.stage_selectors)<=set(STAGES) or not set(self.fields)<=required
             or not set(self.record_fields)<=required or not set(self.next_selectors)<=set(STAGES[:3])
@@ -409,7 +433,7 @@ class ReviewedUI(BaseModel):
         if self.reviewed and not (self.evidence_reference and self.evidence_reference.strip()):raise ValueError('Reviewed evidence needs actual provenance')
         for key,binding in self.fields.items():
             if key in {'ga_tracking','frequency_cap_enabled','contact_limit_enabled'} and binding.kind!='checkbox':raise ValueError('Boolean field requires checkbox evidence')
-            if key=='campaign_name' and binding.kind!='text':raise ValueError('Campaign requires text control')
+            if key in ('campaign_name', *UTM_FIELDS) and binding.kind!='text':raise ValueError('Text field requires text control')
             if key=='schedule_datetime' and binding.kind not in {'text','datetime_split'}:raise ValueError('Schedule requires reviewed date/time inputs')
             if binding.kind=='datetime_split' and (key!='schedule_datetime' or not binding.date_selector or not binding.time_selector):raise ValueError('Incomplete split date/time evidence')
             if key in {'waba','business_number','tag'} and binding.kind not in {'native_select','combobox','selected_text'}:raise ValueError('Dropdown field requires selection evidence')
@@ -502,6 +526,16 @@ class V2ManualAction(V2Action):
 class V2ManualNoVisionAction(V2ManualAction):
     action: Literal.__getitem__(tuple(action for action in V2_BROWSER_CONTRACT
                                       if action not in {'navigate', 'screenshot'}))
+
+
+class V2GATrackingAction(V2Action):
+    action: Literal.__getitem__(tuple(action for action in V2_BROWSER_CONTRACT
+                                      if action in {'observe', 'dom', 'wait', 'inspect', 'type', 'verify', 'scroll'}))
+    field: Literal.__getitem__(GA_SETUP_FIELDS) | None = None
+
+
+class V2GADisabledAction(V2GATrackingAction):
+    field: Literal['campaign_name', 'ga_tracking'] | None = None
 
 
 class V2CampaignStepAction(V2Action):
@@ -641,7 +675,8 @@ class ProcedureStep(BaseModel):
     """Only typed supported procedures become executable candidate guidance."""
     model_config=ConfigDict(extra='forbid',strict=True)
     goal:Literal['setup','audience','content','schedule','preview']
-    when:Literal['control_unresolved','offscreen','options_missing','selection_unverified','milestone_ready']
+    when:Literal['control_unresolved','offscreen','options_missing','selection_unverified','milestone_ready',
+                 'ga_scoped_control_bound']
     action:Literal['observe','dom','screenshot','inspect','click','type','scroll','options','search','select','verify']
     field:StrictStr|None=None
 
@@ -650,9 +685,13 @@ class ProcedureStep(BaseModel):
         allowed={'control_unresolved':{'observe','dom','screenshot','inspect'},
             'offscreen':{'inspect','scroll','screenshot'},
             'options_missing':{'observe','inspect','options','click','search','screenshot'},
-            'selection_unverified':{'inspect','options','select','verify'},'milestone_ready':{'verify'}}
+            'selection_unverified':{'inspect','options','select','verify'},'milestone_ready':{'verify'},
+            'ga_scoped_control_bound':{'type','verify'}}
         if self.action not in allowed[self.when]:raise ValueError('Unsupported procedural combination')
-        if self.field is not None and self.field not in STAGE_FIELDS[self.goal]:raise ValueError('Candidate field outside goal')
+        if self.when=='ga_scoped_control_bound' and (self.goal!='setup' or self.field not in ('ga_tracking', *UTM_FIELDS)):
+            raise ValueError('GA procedure requires an owned Setup tracking field')
+        fields=(*STAGE_FIELDS[self.goal], *UTM_FIELDS) if self.goal=='setup' else STAGE_FIELDS[self.goal]
+        if self.field is not None and self.field not in fields:raise ValueError('Candidate field outside goal')
         if self.action not in {'observe','dom','screenshot','inspect','scroll'} and self.field is None:raise ValueError('Candidate field required')
         return self
 

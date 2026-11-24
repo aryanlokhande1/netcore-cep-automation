@@ -1,12 +1,9 @@
 {
-  "identity": "netcore-cep-login",
-  "approved": false,
-  "status": "UNVERIFIED_INACTIVE",
-  "source_version": 1,
-  "content_sha256": "8984f5e88295c6f6e07a88767d8c0210e189c7d387fdf9cf53f8d90340579d5b",
-  "provenance": {
-    "source": "modules/login/skill/SKILL.md",
-    "live_skill_load_provenance": "NOT_ESTABLISHED",
-    "graduated": false
-  }
+  "identity": "netcore-login",
+  "approved": true,
+  "status": "APPROVED",
+  "source_version": "cf7b1f0ff40f45b9460348d840b3bc1afa141f868b8b116fa275e1853bc7b0e2",
+  "bundle_digest": "cf7b1f0ff40f45b9460348d840b3bc1afa141f868b8b116fa275e1853bc7b0e2",
+  "content_sha256": "b64c130b79db77a462c502b8229acd4fb6f472ed44aef89fd7a47344fc7369c3",
+  "provenance": "approved\\netcore-login"
 }

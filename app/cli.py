@@ -38,6 +38,57 @@ def readiness(config):
 
 
 async def run(args):
+    if args.command == 'sms-preflight':
+        from modules.sms.contract import load_sms_payload
+        from modules.sms.preflight import Preflight, verify_future_schedule
+        from modules.sms.skill import load_skill
+        from modules.whatsapp.workflow import run_human_assisted
+
+        if bool(args.payload) != bool(args.approve_payload_sha256) or (args.sms_teacher or args.through_preview) and not args.payload:
+            raise ConfigurationError('Supply the SMS payload and its approved SHA-256')
+        if args.sms_tag_investigation and (not args.through_preview or not args.sms_iteration):
+            raise ConfigurationError('SMS Tag investigation requires --through-preview and a named iteration')
+        if args.sms_reconcile_before_write and not args.sms_tag_investigation:
+            raise ConfigurationError('Use --sms-reconcile-before-write with --sms-tag-investigation')
+        payload, digest = load_sms_payload(args.payload, approved_digest=args.approve_payload_sha256) if args.payload else (None, None)
+        attestation = args.operator_confirmed_unused_name
+        if attestation is not None and (not args.through_preview or not payload or attestation != payload.campaign_name):
+            raise ConfigurationError('Operator name evidence must match the exact SMS payload name and requires --through-preview')
+        scheduled = None
+        if payload:
+            scheduled = verify_future_schedule()
+        skill = load_skill(version=args.sms_skill_version, expected_digest=args.sms_skill_sha256,
+                           task_digest=digest) if args.through_preview else None
+        diagnostic = Preflight(args.operator_review_seconds, payload=payload, teacher=args.sms_teacher or args.through_preview,
+                               preview=args.through_preview, digest=digest, operator_confirmed_unused_name=attestation,
+                               skill=skill, iteration=args.sms_iteration, tag_investigation=args.sms_tag_investigation,
+                               reconcile_before_write=args.sms_reconcile_before_write)
+        handoff = argparse.Namespace(**vars(args), dashboard_handoff_only=True, operator_confirmed_login=True,
+                                     task_api_budget=0)
+        result = await run_human_assisted(handoff, after_dashboard_handoff=diagnostic,
+                                          before_dashboard_handoff=diagnostic.start)
+        fields = ('run_id', 'status', 'last_verified_step', 'login_verification', 'authentication_verified',
+                  'login_doer_outcome', 'dashboard_handoff_evidence', 'failure', 'elapsed_seconds', 'cleanup',
+                  'login_doer_usage', 'task_doer_usage', 'teacher_usage', 'artifact_directory')
+        details = {field: result.get(field) for field in fields}
+        details.update(payload_path=args.payload, payload_sha256=digest, future_schedule=scheduled.isoformat() if scheduled else None)
+        artifact = Path(result['artifact_directory']) / 'sms-result.json'
+        artifact.write_text(json.dumps(details, indent=2) + '\n', encoding='utf-8')
+        evidence = result.get('dashboard_handoff_evidence') or {}
+        review = evidence.get('review_status')
+        if review == 'SMS_REVIEW_WINDOW_EXPIRED':
+            print('SMS inspection window expired.', flush=True)
+        elif review != 'RELEASED':
+            failure = (result.get('failure') or {}).get('code') or result['status']
+            print(evidence.get('message') if review is None and evidence.get('message') else
+                  f'SMS stopped at {review or failure}.', flush=True)
+        expected = {'SMS_PREVIEW_VERIFIED' if args.through_preview else 'SMS_PREFLIGHT_VERIFIED'}
+        if args.sms_tag_investigation:
+            expected.add('SMS_TAG_INVESTIGATION_COMPLETE')
+        if (result['status'] not in expected or review != 'RELEASED'
+                or result['cleanup'] != 'CLOSED_AND_PROFILE_REMOVED'):
+            raise SystemExit(1)
+        return
     if args.command=='whatsapp-contract':
         from modules.whatsapp.contract import v2_contract_summary
         print(json.dumps(v2_contract_summary(),indent=2));return
@@ -49,6 +100,26 @@ async def run(args):
         await run_login_capture(args.authorized_live,dashboard_only=args.dashboard_only);return
     if args.command=='whatsapp-human-assisted':
         from modules.whatsapp.workflow import run_human_assisted
+        if getattr(args, 'unattended_config', None):
+            result = await run_human_assisted(args)
+            print(json.dumps({key: result.get(key) for key in ('run_id', 'status', 'last_verified_step', 'selected_skill_sha256', 'task_doer_invoked',
+                  'login_verification', 'login_gate_status', 'reconciliation', 'schedule_draft_preview',
+                  'failure', 'cleanup', 'login_doer_usage', 'task_doer_usage', 'teacher_usage')}, indent=2))
+            read_only = result.get('unattended_action') == 'READ_DRAFT'
+            saved_record = result.get('schedule_draft_preview') or {}
+            verified = (result.get('status') == 'PERSISTED_SCHEDULE_MATCH' if read_only else
+                        result.get('unattended_action') == 'SAVE_AND_PREVIEW'
+                        and result.get('status') == 'DRAFT_RECORD_VERIFIED'
+                        and saved_record.get('status') == 'PERSISTED_DRAFT_MATCH'
+                        and saved_record.get('netcore_status') == 'Draft'
+                        and saved_record.get('configuration_source') == 'SAVED_RECORD'
+                        and all(saved_record.get(key) for key in ('campaign_id', 'campaign_name', 'netcore_status',
+                                                                 'date', 'time', 'timezone', 'sender', 'template')))
+            if (not verified
+                    or result.get('authentication_verified') is not True
+                    or result.get('cleanup') != 'CLOSED_AND_PROFILE_REMOVED'):
+                raise SystemExit(1)
+            return
         runs = args.operator_confirmed_runs
         if runs != 1 and not args.operator_confirmed_login:
             raise ConfigurationError('Multiple headed runs require explicit operator-confirmed mode')
@@ -64,10 +135,32 @@ async def run(args):
                 **{key: result.get(key) for key in ('run_id', 'status', 'login_verification',
                    'authentication_verified', 'last_verified_step', 'written_fields', 'verified_fields',
                    'teacher_status', 'failure', 'cleanup', 'artifact_directory', 'login_doer_outcome',
-                   'audience_transition')},
+                   'audience_transition', 'reconciliation', 'selected_skill_sha256', 'ga_readback', 'candidate_review')},
+                'schedule_draft_preview': result.get('schedule_draft_preview'),
                 'write_results': evaluation.get('write_results', []),
             }), flush=True)
             failure = result.get('failure') or {}
+            if getattr(args, 'mcp_ga_setup', False):
+                clean = result.get('cleanup') == 'CLOSED_AND_PROFILE_REMOVED'
+                passed = clean and result.get('status') == 'MCP_GA_VERIFIED'
+                print('MCP_GA_ATTEMPT_RESULT ' + json.dumps({
+                    'attempt': index, 'run_id': result.get('run_id'), 'exit_code': int(not passed),
+                }), flush=True)
+                if passed:
+                    continue
+                retry = result.get('mcp_ga_retry')
+                if index < runs and clean and result.get('status') == 'STUCK' and retry and not failure.get('unsafe'):
+                    args.mcp_ga_retry = retry
+                    continue
+                raise SystemExit(1)
+            mcp_success = ('MCP_CAMPAIGN_NAME_WRITE_VERIFIED' if args.mcp_campaign_name_write
+                           else 'MCP_READ_ONLY_DISCOVERY_VERIFIED')
+            if getattr(args, 'browser_mode', 'direct') == 'mcp' and (
+                    result.get('status') != mcp_success
+                    or result.get('cleanup') != 'CLOSED_AND_PROFILE_REMOVED'):
+                raise SystemExit(1)
+            if getattr(args, 'campaign_b_draft', False) and result.get('status') not in {'DRAFT_PREVIEW_VERIFIED', 'DRAFT_RECORD_VERIFIED'}:
+                raise SystemExit(1)
             if (result.get('cleanup') != 'CLOSED_AND_PROFILE_REMOVED' or failure.get('unsafe')
                     or failure.get('code') == 'OPERATOR_CANCELLED'):
                 print('OPERATOR_BATCH_STOPPED', flush=True)
@@ -212,6 +305,8 @@ def build_parser():
         whatsapp.add_argument('--authorized-'+permission,action='store_true')
     whatsapp.add_argument('--iterations',type=int,default=1)
     whatsapp.add_argument('--candidate')
+    whatsapp.add_argument('--browser-mode', choices=('direct', 'mcp'), default='direct',
+                          help='Use the private in-process MCP connection for WhatsApp task steps')
     whatsapp.add_argument('--login-api-budget',type=int,default=6)
     whatsapp.add_argument('--total-api-budget',type=int,default=24)
     whatsapp.add_argument('--max-turns',type=int,default=20)
@@ -219,8 +314,35 @@ def build_parser():
     login_capture=sub.add_parser('whatsapp-login-capture',help='Capture passive Login signals after operator sign-in')
     login_capture.add_argument('--authorized-live',action='store_true')
     login_capture.add_argument('--dashboard-only',action='store_true')
+    sms_preflight = sub.add_parser('sms-preflight', help='Check SMS prerequisites after protected operator-confirmed Login')
+    sms_preflight.add_argument('--authorized-live', action='store_true')
+    sms_preflight.add_argument('--authorized-inference', action='store_true')
+    sms_preflight.add_argument('--payload')
+    sms_preflight.add_argument('--approve-payload-sha256')
+    sms_preflight.add_argument('--sms-teacher', action='store_true', help='Reserve one real, analysis-only Teacher request')
+    sms_preflight.add_argument('--through-preview', action='store_true', help='Authorize one fixed SMS workflow after all live preflight checks')
+    sms_preflight.add_argument('--operator-confirmed-unused-name', metavar='EXACT_NAME',
+                              help='Attest at payload approval that you already searched this exact name in the same tenant and confirmed it is unused')
+    sms_preflight.add_argument('--sms-iteration', choices=('baseline', 'recovery', 'retention'))
+    sms_preflight.add_argument('--sms-tag-investigation', action='store_true',
+                              help='After read-only name reconciliation, investigate the Setup Tag binding with all write tools withheld')
+    sms_preflight.add_argument('--sms-reconcile-before-write', action='store_true',
+                              help='Offer payload approval only after Campaigns verifies the exact name is unused')
+    sms_preflight.add_argument('--sms-skill-version', help='Load this exact unapproved, validated SMS candidate')
+    sms_preflight.add_argument('--sms-skill-sha256', help='Pin the baseline or candidate bytes')
+    sms_preflight.add_argument('--login-api-budget', type=int, default=6)
+    sms_preflight.add_argument('--total-api-budget', type=int, default=6)
+    sms_preflight.add_argument('--login-evidence-file')
+    sms_preflight.add_argument('--operator-review-seconds', type=int, default=300)
+    sms_preflight.add_argument('--session-seconds', type=int, default=900)
     human_assisted=sub.add_parser('whatsapp-human-assisted',
         help='One headed Login attempt and consent-gated WhatsApp Doer diagnostic (read-only by default)')
+    human_assisted.add_argument('--browser-mode', choices=('direct', 'mcp'), default='direct',
+                                help='Opt in to operator-confirmed MCP Setup validation')
+    human_assisted.add_argument('--mcp-campaign-name-write', action='store_true',
+        help='Validate one pinned Campaign Name edit via MCP with separate operator approval')
+    human_assisted.add_argument('--mcp-ga-setup', action='store_true',
+        help='Validate only the pinned GA Tracking boolean via MCP at Setup')
     for permission in ('live','inference','candidate-evaluation'):
         human_assisted.add_argument('--authorized-'+permission,action='store_true')
     human_assisted.add_argument('--manual-form-test',action='store_true',
@@ -233,7 +355,17 @@ def build_parser():
     human_assisted.add_argument('--operator-confirmed-runs', type=int, choices=(1, 2, 3), default=1)
     human_assisted.add_argument('--page1-through-audience', action='store_true')
     human_assisted.add_argument('--through-schedule', action='store_true')
+    human_assisted.add_argument('--reconcile-run')
+    human_assisted.add_argument('--dashboard-handoff-only', action='store_true',
+        help='Run the Login Doer, confirm the tenant, and hold the owned dashboard without opening a campaign')
     human_assisted.add_argument('--save-schedule-draft', action='store_true')
+    human_assisted.add_argument('--one-approval-draft', action='store_true')
+    human_assisted.add_argument('--preview-draft-validation', action='store_true')
+    draft_payload = human_assisted.add_mutually_exclusive_group()
+    draft_payload.add_argument('--campaign-a-draft', action='store_true', help='Use the reviewed campaign A payload for one operator-confirmed draft')
+    draft_payload.add_argument('--campaign-b-draft', action='store_true', help='Use the reviewed campaign B payload for one operator-confirmed draft')
+    human_assisted.add_argument('--campaigns-diagnostic', action='store_true')
+    human_assisted.add_argument('--campaigns-reload-once', action='store_true')
     human_assisted.add_argument('--through-audience', action='store_true')
     human_assisted.add_argument('--capture-audience-failure', action='store_true')
     human_assisted.add_argument('--authorized-learning',action='store_true',
@@ -253,6 +385,12 @@ def build_parser():
     human_assisted.add_argument('--session-seconds',type=int,default=900)
     human_assisted.add_argument('--login-evidence-file',
         help='Optional existing private Login evidence contract; campaign values remain in the approved private payload')
+    human_assisted.add_argument('--unattended-config', help='Trusted read-only operator approval JSON')
+    human_assisted.add_argument('--unattended-payload', help='Read-only payload file matched to the unattended approval digest')
+    human_assisted.add_argument('--ga-setup-payload', help='Fixed payload for the operator-confirmed GA Setup-only test')
+    human_assisted.add_argument('--ga-setup-sha256', help='Exact reviewed GA payload SHA-256')
+    human_assisted.add_argument('--ga-teacher-inspection', action='store_true',
+        help='Allow bounded read-only DOM/AX and scoped vision review of the held GA Setup tab')
     replay=sub.add_parser('teacher-replay',help='Teacher-only review of saved real evidence; no browser/fixtures/credentials')
     replay.add_argument('--run-id',required=True)
     replay.add_argument('--mode',choices=['openai'],default='openai')
@@ -320,10 +458,13 @@ def build_parser():
 
 def main():
     parser=build_parser()
+    args=parser.parse_args()
     try:
-        asyncio.run(run(parser.parse_args()))
+        asyncio.run(run(args))
     except KeyboardInterrupt:
         print('Cancelled; owned browser cleanup was requested.')
+        if getattr(args, 'unattended_config', None):
+            raise SystemExit(130)
     except Exception as error:
         from modules.whatsapp.contract import V2Stop
         from browser.evidence_diagnostics import EvidenceFailure

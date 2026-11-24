@@ -331,3 +331,76 @@ async def test_graph_executes_login_once_and_keeps_unverified_diagnostic_separat
     assert calls == {"login": 1, "verified": 0, "diagnostic": 1}
     assert result["authentication_verified"] is False
     assert result["status"] == "HUMAN_SUPERVISED_WHATSAPP_DIAGNOSTIC"
+def test_dashboard_handoff_requires_login_only_budget():
+    import pytest
+    from types import SimpleNamespace
+    from app.config import ConfigurationError
+    from modules.whatsapp.workflow import validate_human_assisted_authorization
+
+    args = SimpleNamespace(dashboard_handoff_only=True, authorized_live=True,
+                           authorized_inference=True, login_api_budget=8, total_api_budget=8,
+                           task_api_budget=0)
+    assert validate_human_assisted_authorization(args, 8) == {
+        'login': 8, 'task': 0, 'observer': 0, 'teacher': 0, 'total': 8}
+    args.task_api_budget = 1
+    with pytest.raises(ConfigurationError):
+        validate_human_assisted_authorization(args, 8)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status,cleanup,expected_exit', [
+    ('MCP_CAMPAIGN_NAME_WRITE_VERIFIED', 'CLOSED_AND_PROFILE_REMOVED', 0),
+    ('MCP_CAMPAIGN_NAME_READBACK_MISMATCH', 'CLOSED_AND_PROFILE_REMOVED', 1),
+    ('MCP_CAMPAIGN_NAME_WRITE_VERIFIED', 'CLEANUP_UNCONFIRMED', 1),
+])
+async def test_mcp_campaign_name_write_cli_exit(status, cleanup, expected_exit, monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.cli import build_parser, run
+    from modules.whatsapp import workflow
+
+    args = build_parser().parse_args(['whatsapp-human-assisted', '--browser-mode', 'mcp',
+                                      '--mcp-campaign-name-write', '--manual-form-test',
+                                      '--operator-confirmed-login'])
+    mocked = AsyncMock(return_value={'status': status, 'cleanup': cleanup})
+    monkeypatch.setattr(workflow, 'run_human_assisted', mocked)
+    if expected_exit:
+        with pytest.raises(SystemExit) as stop:
+            await run(args)
+        assert stop.value.code == expected_exit
+    else:
+        await run(args)
+    mocked.assert_awaited_once_with(args)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('outcomes, expected_attempts, expected_exit', [
+    (('pass', 'pass', 'pass'), [None, None, None], 0),
+    (('candidate-a', 'pass', 'pass'), [None, 'candidate-a', 'candidate-a'], 0),
+    (('candidate-a', 'candidate-b', 'pass'), [None, 'candidate-a', 'candidate-b'], 0),
+    (('candidate-a', 'blocked'), [None, 'candidate-a'], 1),
+    (('blocked',), [None], 1),
+])
+async def test_mcp_ga_batch_reuses_only_validated_corrections(outcomes, expected_attempts, expected_exit, monkeypatch):
+    from app.cli import build_parser, run
+    from modules.whatsapp import workflow
+
+    args = build_parser().parse_args(['whatsapp-human-assisted', '--browser-mode', 'mcp', '--mcp-ga-setup',
+                                      '--operator-confirmed-login', '--operator-confirmed-runs', '3'])
+    seen = []
+
+    async def attempt(runtime):
+        inherited = getattr(runtime, 'mcp_ga_retry', None)
+        seen.append(inherited and inherited['candidate'])
+        outcome = outcomes[len(seen) - 1]
+        correction = {'candidate': outcome} if outcome.startswith('candidate-') else None
+        return {'status': 'MCP_GA_VERIFIED' if outcome == 'pass' else 'STUCK',
+                'cleanup': 'CLOSED_AND_PROFILE_REMOVED', 'mcp_ga_retry': correction}
+
+    monkeypatch.setattr(workflow, 'run_human_assisted', attempt)
+    if expected_exit:
+        with pytest.raises(SystemExit) as stop:
+            await run(args)
+        assert stop.value.code == expected_exit
+    else:
+        await run(args)
+    assert seen == expected_attempts

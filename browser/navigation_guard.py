@@ -22,6 +22,7 @@ class GuardProtocolError(RuntimeError):
         message=error.get('message')
         self.protocol_reason={'Invalid InterceptionId.':'INVALID_INTERCEPTION_ID',
             'Invalid InterceptionId':'INVALID_INTERCEPTION_ID',
+            'Could not find node with given id':'NODE_ID_NOT_FOUND',
             'Session with given id not found.':'SESSION_NOT_FOUND',
             'No target with given id found':'TARGET_NOT_FOUND'}.get(message,'UNCLASSIFIED_PROTOCOL_ERROR')
         self.protocol_error_sha256=hashlib.sha256(json.dumps(error,sort_keys=True,separators=(',',':')).encode()).hexdigest()

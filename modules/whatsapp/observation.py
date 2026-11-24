@@ -510,7 +510,122 @@ CAMPAIGN_PICKER_HELPERS = r'''
  };
 '''
 
-V2_EXPLORE=r'''(s=>{''' + V2_LABEL_HELPERS + TAG_CHIP_HELPERS + CAMPAIGN_PICKER_HELPERS + r'''
+GA_TRACKING_HELPERS = r'''
+ const gaText=value=>String(value??'').trim().replace(/\s+/g,' ').replace(/[\s*:]+$/g,'').toLowerCase();
+ const gaVisible=e=>!!e&&e.getClientRects().length>0&&getComputedStyle(e).visibility==='visible'&&
+   !e.closest('[hidden],[aria-hidden=true],[inert]');
+ const gaLeaves=(root,labels)=>[...root.querySelectorAll('h2,h3,h4,h5,[role=heading],legend,label,div,span,p,strong')]
+   .filter(e=>gaVisible(e)&&labels.has(gaText(e.innerText))&&
+     ![...e.children].some(n=>gaVisible(n)&&labels.has(gaText(n.innerText))));
+ const gaAdvancedLabels=new Set(['advanced','advanced settings','advanced options']);
+ const gaSwitches='input[type=checkbox],[role=checkbox],[role=switch]';
+ const gaAdvanced=root=>{
+   const groups=new Set(),closed=new Set();
+   const headings=gaLeaves(root,gaAdvancedLabels);
+   for(const e of root.querySelectorAll('button,[role=button],summary,mat-expansion-panel-header')){
+     if(!gaVisible(e)||!gaAdvancedLabels.has(gaText(e.innerText||e.getAttribute('aria-label')))||
+         e.matches('a[href],button[type=submit]')||e.disabled||e.closest('[aria-disabled=true]'))continue;
+     const details=e.matches('summary')?e.parentElement:null;
+     const id=e.getAttribute('aria-controls'), related=id?document.querySelectorAll('#'+CSS.escape(id)):[];
+     const angular=e.closest('mat-expansion-panel');
+     const region=details||angular||(related.length===1?related[0]:null);
+     if(!region||!root.contains(region))continue;
+     if(details?.open===false||e.getAttribute('aria-expanded')==='false')closed.add(e);
+     else if(gaVisible(region))groups.add(region);
+   }
+   for(const e of headings){
+     if(e.closest('button,[role=button],summary,mat-expansion-panel-header'))continue;
+     for(let p=e.parentElement,depth=0;p&&p!==root&&depth<6;p=p.parentElement,depth++){
+       if(gaLeaves(p,gaLabels).length===1){groups.add(p);break;}
+     }
+   }
+   return {region:groups.size===1&&closed.size===0?[...groups][0]:null,
+           toggle:groups.size===0&&closed.size===1?[...closed][0]:null,
+           heading_count:headings.length,region_count:groups.size,collapsed_count:closed.size};
+ };
+ const gaUtmAliases={
+   utm_source:['source','campaign source','utm source','utm_source'],
+   utm_medium:['medium','campaign medium','utm medium','utm_medium'],
+   utm_campaign:['campaign','campaign name','campaign id','utm campaign','utm_campaign'],
+   utm_content:['content','campaign content','utm content','utm_content'],
+   utm_term:['term','campaign term','utm term','utm_term']};
+ const gaVisibleInputLabels=e=>{
+   const candidates=[...(e.labels||[]),...(e.getAttribute('aria-labelledby')||'').split(/\s+/)
+     .map(id=>id&&document.getElementById(id)).filter(Boolean)];
+   for(let p=e.parentElement,depth=0;p&&depth<4;p=p.parentElement,depth++){
+     const inputs=[...p.querySelectorAll('input,textarea')].filter(gaVisible);
+     if(inputs.length!==1||inputs[0]!==e)break;
+     candidates.push(...[...p.querySelectorAll('label,mat-label')].filter(n=>
+       !n.getAttribute('for')||!!e.id&&n.getAttribute('for')===e.id));
+   }
+   return new Set(candidates.filter(gaVisible).map(n=>gaText(n.innerText)));
+ };
+ const gaUtmKey=e=>{
+   const labels=gaVisibleInputLabels(e);
+   const recognized=Object.keys(gaUtmAliases);
+   const hasKey=(key,value)=>key.replaceAll('_','')===gaText(value).replace(/[_ -]/g,'');
+   const labelFields=recognized.filter(key=>gaUtmAliases[key].some(label=>labels.has(label)));
+   const declared=recognized.filter(key=>['name','id','formcontrolname','data-utm-key']
+     .some(attr=>hasKey(key,e.getAttribute(attr))));
+   return labelFields.length===1&&(declared.length===0||declared.length===1&&declared[0]===labelFields[0])?
+     labelFields[0]:null;
+ };
+ const gaTrackingOwners=(root,allowAdjacentKeys=false)=>{
+   const advanced=gaAdvanced(root), owners={}, counts={};
+   if(!advanced.region)return {advanced,owners,counts,card_count:0};
+   const cards=new Set(), headings=gaLeaves(advanced.region,gaLabels);
+   for(const h of headings){
+     // Prefer a card/group owner when the label is nested beside the switch.
+     const card=h.closest('mat-card,fieldset,section,[role=group],article');
+     if(card&&advanced.region.contains(card)&&[...card.querySelectorAll(gaSwitches)].some(gaVisible)){
+       cards.add(card);continue;
+     }
+     for(let p=h.parentElement, depth=0;p&&advanced.region.contains(p)&&depth<7;p=p.parentElement,depth++){
+       if([...p.querySelectorAll(gaSwitches)].some(gaVisible)){
+         if(p!==advanced.region&&p.parentElement&&advanced.region.contains(p.parentElement)&&
+            [...p.parentElement.querySelectorAll('input,textarea')].filter(gaVisible).some(e=>gaUtmKey(e)))
+           p=p.parentElement;
+         cards.add(p);break;
+       }
+     }
+   }
+   if(cards.size!==1)return {advanced,owners,counts,card_count:cards.size,tracking_heading_count:headings.length};
+   const card=[...cards][0];
+   const switches=[...card.querySelectorAll(gaSwitches)].filter(gaVisible);
+   counts.ga_tracking=switches.length;
+   if(switches.length===1){
+     owners.ga_tracking=switches[0];
+     const enabled=switches[0].type==='checkbox'?switches[0].checked:switches[0].getAttribute('aria-checked')==='true';
+     if(enabled){
+       const inputs=[...card.querySelectorAll('input:not([type]),input[type=text],textarea')].filter(gaVisible);
+       for(const key of Object.keys(gaUtmAliases)){
+         const matches=inputs.filter(e=>gaUtmKey(e)===key);
+         counts[key]=matches.length;
+         if(matches.length===1)owners[key]=matches[0];
+       }
+     if(allowAdjacentKeys&&!Object.keys(gaUtmAliases).some(key=>owners[key])){
+       // A validated GA procedure can use the live-observed Angular inputs
+       // beside the switch group. Require the whole exact set in Advanced.
+       for(let group=card.parentElement,depth=0;group&&advanced.region.contains(group)&&depth<3;
+           group=group.parentElement,depth++){
+         const matches=Object.keys(gaUtmAliases).map(key=>[...group.querySelectorAll('input[type=text],input:not([type])')]
+           .filter(e=>!card.contains(e)&&gaVisible(e)&&!e.disabled&&!e.readOnly&&
+             e.id===key&&e.getAttribute('formcontrolname')===key&&document.querySelectorAll('#'+CSS.escape(key)).length===1&&
+             [...(e.labels||[])].filter(gaVisible).length===1));
+         if(matches.every(rows=>rows.length===1)){
+           Object.keys(gaUtmAliases).forEach((key,index)=>{owners[key]=matches[index][0];counts[key]=1;});
+           return {advanced,owners,counts,card_count:cards.size,tracking_heading_count:headings.length,
+                   binding_basis:'ADJACENT_EXACT_ANGULAR_KEYS'};
+         }
+       }
+     }
+     }
+   }
+   return {advanced,owners,counts,card_count:cards.size,tracking_heading_count:headings.length};
+ };
+'''
+
+V2_EXPLORE=r'''(s=>{''' + V2_LABEL_HELPERS + TAG_CHIP_HELPERS + CAMPAIGN_PICKER_HELPERS + GA_TRACKING_HELPERS + r'''
  const norm=x=>String(x??'').replace(/\s+/g,' ').trim();
  const visible=e=>!!e&&e.getClientRects().length>0&&getComputedStyle(e).visibility!=='hidden';
  const unique=q=>{if(!q)return null;const a=document.querySelectorAll(q);return a.length===1?a[0]:null};
@@ -520,9 +635,12 @@ V2_EXPLORE=r'''(s=>{''' + V2_LABEL_HELPERS + TAG_CHIP_HELPERS + CAMPAIGN_PICKER_
     parts.unshift(n.tagName.toLowerCase()+':nth-of-type('+(siblings.indexOf(n)+1)+')');
     const q=parts.join(' > ');if(unique(q)===e)return q;}return null;};
  const pickerOwners=s.campaign_walkthrough&&['audience','content'].includes(s.stage)?campaignPickerOwners(s.stage):{};
- const sectionField=e=>Object.keys(pickerOwners).find(key=>pickerOwners[key]===e);
+ let gaOwners={};
+ const sectionField=e=>Object.keys(pickerOwners).find(key=>pickerOwners[key]===e)||Object.keys(gaOwners).find(key=>gaOwners[key]===e);
  const label=e=>sectionField(e)?.replace('_',' ')||fieldLabel(e,s.strategy);
- const fieldKey=e=>{const key=sectionField(e)||s.aliases[label(e).replace(/[\s*:]+$/g,'').toLowerCase()];return key&&s.goal_fields.includes(key)?key:null};
+ const fieldKey=e=>{const owned=sectionField(e), key=owned||s.aliases[label(e).replace(/[\s*:]+$/g,'').toLowerCase()];
+   return key&&s.goal_fields.includes(key)&&(!s.ga_test||key==='campaign_name'||owned===key)
+     &&(!s.ga_scope||key!=='ga_tracking'||owned===key)?key:null;};
  const forms=[...document.querySelectorAll('form,[role=form]')].filter(visible);
  const mains=[...document.querySelectorAll('main,[role=main]')].filter(visible);
  const declared=unique(s.scope);
@@ -556,6 +674,8 @@ V2_EXPLORE=r'''(s=>{''' + V2_LABEL_HELPERS + TAG_CHIP_HELPERS + CAMPAIGN_PICKER_
  const scopeProven=!!declared||!!campaignScope||!!audienceScope||forms.length===1||labelledForms.length===1||
    forms.length===0&&mains.length===1;
  if(!scope||!visible(scope))return {stage_visible:false,nodes:[],field_candidates:[],scope_basis:'UNRESOLVED'};
+ const ga=s.ga_test||s.ga_scope?gaTrackingOwners(scope,s.ga_adjacent_keys):null;
+ if(ga)gaOwners=ga.owners;
  const bindings=Object.fromEntries(Object.entries(s.fields).filter(([field])=>s.reviewed_fields.includes(field))),fieldCandidates=[];
  for(const e of [...scope.querySelectorAll(controlSelector)].slice(0,1000)){
    if(!visible(e)||e.type==='password'||e.type==='file'||e.type==='hidden')continue;
@@ -625,6 +745,7 @@ V2_EXPLORE=r'''(s=>{''' + V2_LABEL_HELPERS + TAG_CHIP_HELPERS + CAMPAIGN_PICKER_
     const c=unique(b.selector),ids=c?((c.getAttribute('aria-controls')||'')+' '+(c.getAttribute('aria-owns')||'')).split(/\s+/):[];
     if(e.matches('[role=option]')&&ids.some(id=>id&&document.getElementById(id)?.contains(e))){field=k;part='option';break;}
    }
+   if(s.ga_test&&!s.goal_fields.includes(field))continue;
    const text=norm(e.getAttribute('aria-label')||e.labels?.[0]?.textContent||e.textContent);
    const expected=field?s.values[field]:null;
    let exact=typeof expected==='string'&&(norm(e.value)===expected||norm(e.textContent)===expected);
@@ -714,7 +835,11 @@ V2_EXPLORE=r'''(s=>{''' + V2_LABEL_HELPERS + TAG_CHIP_HELPERS + CAMPAIGN_PICKER_
              popup_owner_declared:!!(e.getAttribute('aria-controls')||e.getAttribute('aria-owns')),
              disabled:e.matches(':disabled,[aria-disabled=true]')||!!e.closest('[aria-disabled=true],[inert]')};
    }):[];
- return {ga_row_evidence:gaRows,audience_picker_evidence:audiencePickers,audience_section_evidence:audienceSections,stage_visible:!!declared||(scopeProven&&(fieldCandidates.length>0||
+ return {ga_row_evidence:gaRows,ga_advanced_selector:ga?.advanced.toggle?selector(ga.advanced.toggle):null,
+   ga_card_evidence:ga?{card_count:ga.card_count,tracking_heading_count:ga.tracking_heading_count??0,
+     advanced_headings:ga.advanced.heading_count,advanced_regions:ga.advanced.region_count,
+     advanced_closed:ga.advanced.collapsed_count,bindings:ga.counts,binding_basis:ga.binding_basis??'CARD_LABELS'}:null,
+   audience_picker_evidence:audiencePickers,audience_section_evidence:audienceSections,stage_visible:!!declared||(scopeProven&&(fieldCandidates.length>0||
    setupHeading.length===1&&setupForm)),nodes,truncated:candidateNodes.length>nodeLimit,
    scoped_option_evidence:s.current_field==='tag'?{...scopedOptions,tag_chips:tagChipCounts}:scopedOptions,
    scope_selector:scopeProven?selector(scope):null,field_candidates:fieldCandidates,
@@ -730,7 +855,7 @@ V2_EXPLORE=r'''(s=>{''' + V2_LABEL_HELPERS + TAG_CHIP_HELPERS + CAMPAIGN_PICKER_
 })(SETTINGS)'''
 
 
-async def explore_v2(browser,ui,payload,stage,*,reviewed_fields=None,reviewed_stages=None,diagnostic=False,strategy=None,current_field=None,campaign_walkthrough=False,audience_option=None):
+async def explore_v2(browser,ui,payload,stage,*,reviewed_fields=None,reviewed_stages=None,diagnostic=False,strategy=None,current_field=None,campaign_walkthrough=False,audience_option=None,ga_fields=None,ga_adjacent_keys=False,ga_scope=False):
     if diagnostic:
         if ui is not None or payload is not None:
             raise ValueError('Diagnostic observation cannot receive campaign context')
@@ -755,11 +880,14 @@ async def explore_v2(browser,ui,payload,stage,*,reviewed_fields=None,reviewed_st
         trusted_fields=set(ui.fields) if reviewed_fields is None and ui.reviewed else set(reviewed_fields or ())
         trusted_stages=set(ui.stage_selectors) if reviewed_stages is None and ui.reviewed else set(reviewed_stages or ())
         settings={'stage':stage,'scope':ui.stage_selectors.get(stage) if stage in trusted_stages else None,
-            'reviewed_fields':sorted(trusted_fields),'goal_fields':STAGE_FIELDS[stage],'aliases':aliases,
+            'reviewed_fields':sorted(trusted_fields),'goal_fields':ga_fields or STAGE_FIELDS[stage],'aliases':aliases,
             'fields':{k:v.model_dump() for k,v in ui.fields.items()},'values':payload.model_dump()}
     settings['strategy']=strategy or 'semantic'
     settings['current_field'] = current_field
     settings['campaign_walkthrough'] = campaign_walkthrough
+    settings['ga_test'] = ga_fields is not None
+    settings['ga_scope'] = ga_scope
+    settings['ga_adjacent_keys'] = ga_adjacent_keys
     if audience_option is not None:
         field, value = audience_option
         settings['values'][field] = value

@@ -158,6 +158,34 @@ def _write_json(directory, name, value, trace):
     _atomic_write(directory / name, _json_text(value, trace))
 
 
+def capture_doer_instructions(directory, trace, skill_sha, system_text, skill_text, task_text):
+    """Confirm authored text at dispatch and retain only its redacted excerpt."""
+    def texts(message):
+        body = message.get('content')
+        if isinstance(body, str):
+            return [body]
+        return [block['text'] for block in body or ()
+                if isinstance(block, dict) and block.get('type') == 'input_text' and isinstance(block.get('text'), str)]
+
+    def redact(text):
+        return ''.join(trace.redact_agent(line) for line in text.splitlines(keepends=True))
+
+    def capture(instructions, system, users, request_digest):
+        system_blocks = [instructions, *(text for message in system for text in texts(message))]
+        system_matched = any(system_text + skill_text in text for text in system_blocks if isinstance(text, str))
+        task_matched = any(text.startswith(task_text) for message in users for text in texts(message))
+        entry = {'run_id': trace.run_id, 'skill_sha256': skill_sha, 'request_sha256': request_digest,
+                 'system_excerpt_matched': system_matched, 'task_excerpt_matched': task_matched}
+        if system_matched:
+            entry.update(system_instructions=redact(system_text), skill_instructions=redact(skill_text))
+        if task_matched:
+            entry['task_instructions'] = redact(task_text)
+        with (directory / 'whatsapp-doer-instructions.jsonl').open('a', encoding='utf-8') as stream:
+            stream.write(json.dumps(entry, ensure_ascii=False) + '\n')
+
+    return capture
+
+
 def append_live_terminal_event(path, event, trace):
     event=trace.redact_agent(_strip_values(event))
     facts=event.get('diagnostic') if event.get('kind')=='browser_diagnostic' else event
@@ -174,7 +202,7 @@ def append_live_terminal_event(path, event, trace):
         'budget_input_over_limit','budget_output_over_limit',
         'user_message_count','other_message_count','login_output_cap','task_output_cap','requests',
         'actions','read_only','source_version','content_sha256','evidence_ref','version',
-        'scope_reason_counts','changed_properties')
+        'scope_reason_counts','changed_properties','click_result','failing_stage','field')
     meaningful=not (event.get('kind')=='browser_diagnostic' and event.get('component')=='GUARD'
         and facts.get('state') in {'COMMAND_STARTED','COMMAND_COMPLETED','REQUEST_PAUSED','FRAME_TREE_SNAPSHOT'})
     line = "[{timestamp}][{run}][{source}] {phase} {kind} {event}\n".format(

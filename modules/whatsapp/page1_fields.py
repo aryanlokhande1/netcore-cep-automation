@@ -2,7 +2,8 @@
 import asyncio
 import json
 
-from modules.whatsapp.contract import PAGE1_SETUP_FIELDS, STAGE_FIELDS, V2Stop
+from browser.observed_control import lost_observed_node, observed_node
+from modules.whatsapp.contract import PAGE1_SETUP_FIELDS, STAGE_FIELDS, SetupStop, V2Stop
 from modules.whatsapp.observer import deterministic_readback
 
 
@@ -29,37 +30,89 @@ async def field_action(tools, field, action, reference):
     return result
 
 
-async def choose_settled_template(tools):
+async def template_picker_identity(tools, *, searched):
+    from modules.whatsapp.observation import CAMPAIGN_PICKER_HELPERS
+    from modules.whatsapp.page1_transition import verify_active_campaign_stage
+
+    document = await tools.protect()
+    await verify_active_campaign_stage(tools, 'content')
+    control = tools.binding('template').selector
+    expression = (r'''(s=>{''' + CAMPAIGN_PICKER_HELPERS + r'''
+      const c=campaignPickerOwners('content').template;
+      if(!c||c.getAttribute('aria-expanded')!=='true'||document.querySelectorAll(s.control).length!==1||
+         document.querySelector(s.control)!==c)return null;
+      const ids=[...new Set(((c.getAttribute('aria-controls')||'')+' '+(c.getAttribute('aria-owns')||''))
+        .split(/\s+/).filter(Boolean))];
+      const panels=ids.map(id=>'#'+CSS.escape(id)).filter(q=>document.querySelectorAll(q).length===1&&
+        campaignVisible(document.querySelector(q)));
+      if(panels.length!==1)return null;
+      const searches=[...document.querySelector(panels[0]).querySelectorAll('input,[role=searchbox]')]
+        .filter(e=>campaignVisible(e)&&e.matches('input:not([type]),input[type=text],input[type=search]')&&
+          !e.disabled&&!e.readOnly);
+      return searches.length===1&&(!s.searched||searches[0].value===s.value)?panels[0]:null;
+    })(SETTINGS)''').replace('SETTINGS', json.dumps({'control': control, 'searched': searched,
+                                                     'value': tools.payload.template}))
+    panel = await tools.browser.page.evaluate(expression)
+    if not panel:
+        raise V2Stop('CONTENT_TEMPLATE_PICKER_CHANGED', owner='recognition')
+    trigger_identity = await observed_node(tools.browser, control)
+    panel_identity = await observed_node(tools.browser, panel)
+    if await tools.protect() != document or await tools.browser.page.evaluate(expression) != panel:
+        raise V2Stop('CONTENT_TEMPLATE_PICKER_CHANGED', owner='recognition')
+    return document, trigger_identity, panel_identity
+
+
+async def choose_settled_template(tools, picker):
     # The exact name can appear in the unfiltered result list. Wait for the
     # search to replace it and verify a stable backend node before selection.
     await asyncio.sleep(.8)
-    previous = None
-    for attempt in range(4):
-        await tools.observe()
-        choices = controls_for(tools, 'template', 'option')
-        evidence = (tools.last_observation or {}).get('scoped_option_evidence', {})
-        current = None
-        if len(choices) == 1 and has_verified_open(tools, 'template'):
-            reference = choices[0]['reference']
-            entry = tools.references.get(reference)
-            if entry:
-                current = (entry['identity'], evidence.get('visible_owned'))
-                if current == previous:
-                    tools.browser.trace.agent_event('content_template_results_settled', role='observer',
-                        status='UNIQUE_STABLE_RESULT', visible_option_count=evidence.get('visible_owned'),
-                        observations=attempt+1)
-                    return await field_action(tools, 'template', 'select', reference)
-        previous = current
-        if attempt < 3:
-            await asyncio.sleep(.4)
-    reason = ('CONTENT_TEMPLATE_RESULT_AMBIGUOUS' if len(choices) > 1 else
-              'CONTENT_TEMPLATE_RESULT_MISSING' if not choices else 'CONTENT_TEMPLATE_RESULT_NOT_STABLE')
-    tools.browser.trace.agent_event('content_template_results_settled', role='observer',
-        status=reason, exact_option_count=len(choices), visible_option_count=evidence.get('visible_owned'))
-    return blocked(reason, option_evidence=evidence)
+    trace = tools.browser.trace
+
+    async def require_same_picker():
+        if await template_picker_identity(tools, searched=True) != picker:
+            raise V2Stop('CONTENT_TEMPLATE_PICKER_CHANGED', owner='recognition')
+
+    for rebind in (False, True):
+        await require_same_picker()
+        previous = None
+        for attempt in range(4):
+            try:
+                await tools.observe()
+            except SetupStop as error:
+                if not lost_observed_node(error) or rebind:
+                    raise
+                break
+            choices = controls_for(tools, 'template', 'option')
+            evidence = (tools.last_observation or {}).get('scoped_option_evidence', {})
+            current = None
+            if len(choices) == 1 and not evidence.get('scan_limited') and has_verified_open(tools, 'template'):
+                reference = choices[0]['reference']
+                entry = tools.references.get(reference)
+                if entry:
+                    current = (entry['identity'], evidence.get('visible_owned'))
+                    if current == previous:
+                        await require_same_picker()
+                        trace.agent_event('content_template_results_settled', role='observer',
+                            status='UNIQUE_STABLE_RESULT', visible_option_count=evidence.get('visible_owned'),
+                            observations=attempt+1, rebound=rebind, reference=reference)
+                        result, _ = await tools.action({'action': 'select', 'field': 'template', 'reference': reference},
+                                                       template_rebind_available=not rebind)
+                        if not result.get('template_rebind_required'):
+                            return result
+                        break
+            previous = current
+            if attempt < 3:
+                await asyncio.sleep(.4)
+        else:
+            reason = ('CONTENT_TEMPLATE_RESULT_AMBIGUOUS' if len(choices) > 1 else
+                      'CONTENT_TEMPLATE_RESULT_MISSING' if not choices else 'CONTENT_TEMPLATE_RESULT_NOT_STABLE')
+            trace.agent_event('content_template_results_settled', role='observer', status=reason,
+                exact_option_count=len(choices), visible_option_count=evidence.get('visible_owned'), rebound=rebind)
+            return blocked(reason, option_evidence=evidence)
+        trace.agent_event('content_template_rebind', role='observer', status='READ_ONLY_REOBSERVATION')
 
 
-async def choose_dropdown(tools, field, control):
+async def choose_dropdown(tools, field, control, *, retry_closed=False):
     if tools.binding(field).kind == 'native_select':
         if field == 'tag':
             return blocked('TAG_CHIP_PICKER_NOT_BOUND')
@@ -79,6 +132,8 @@ async def choose_dropdown(tools, field, control):
                 return opened
             # The click path refreshed the observation. Re-resolve before
             # distinguishing a stale trigger from an open or closed popup.
+            if retry_closed:
+                await tools.observe(strategy='dom')
             fresh = controls_for(tools, field)
             inspection = (await field_action(tools, field, 'inspect', fresh[0]['reference'])
                           if len(fresh) == 1 else blocked('FRESH_TRIGGER_NOT_UNIQUE'))
@@ -87,10 +142,15 @@ async def choose_dropdown(tools, field, control):
                 failure=opened.get('error'), trigger_resolved=len(fresh) == 1,
                 trigger_expanded=inspection.get('expanded'), owned_menu_observed=observed_open,
                 inspection_error=inspection.get('error'))
-            if not observed_open and field == 'template' and len(fresh) == 1 and inspection.get('expanded') is False:
+            if (not observed_open and (field == 'template' or retry_closed)
+                    and len(fresh) == 1 and inspection.get('expanded') is False):
                 retried = await field_action(tools, field, 'click', fresh[0]['reference'])
                 if not retried.get('dropdown_open_verified'):
-                    return retried
+                    if not retry_closed or tools.terminal or tools.pending_write:
+                        return retried
+                    await tools.observe(strategy='dom')
+                    if not has_verified_open(tools, field):
+                        return retried
             elif not observed_open:
                 return blocked(opened.get('error', 'OWNED_DROPDOWN_NOT_OPEN'),
                                trigger_inspection=inspection.get('error'),
@@ -104,6 +164,7 @@ async def choose_dropdown(tools, field, control):
                         if item.get('tag') == 'INPUT' and item.get('type') in {'text', 'search'}]
         if len(searches) == 1:
             if field == 'template':
+                template_picker = await template_picker_identity(tools, searched=False)
                 focused = await field_action(tools, field, 'click', searches[0]['reference'])
                 if not focused.get('focused'):
                     return focused
@@ -111,12 +172,13 @@ async def choose_dropdown(tools, field, control):
             if not search.get('ok'):
                 return search
             searched = True
-            await tools.observe()
+            if field != 'template':
+                await tools.observe()
         elif field in {'tag', 'template'} or audience_search:
             code = {'tag':'TAG_PICKER_SEARCH_NOT_UNIQUE','template':'CONTENT_OWNED_SEARCH_INPUT_NOT_UNIQUE'}
             return blocked(code.get(field, 'AUDIENCE_OWNED_SEARCH_INPUT_NOT_UNIQUE'), found=len(searches))
     if field == 'template':
-        return await choose_settled_template(tools)
+        return await choose_settled_template(tools, template_picker)
     # Read-only wait for the options of the already-open, owned picker.
     for attempt in range(3):
         choices = controls_for(tools, field, 'option')
@@ -149,7 +211,7 @@ async def apply_known_field(tools, field):
     return blocked('FIELD_CONTROL_KIND_NOT_SUPPORTED', control_kind=kind)
 
 
-async def run_page1_fields(tools, recover):
+async def run_page1_fields(tools, recover, *, verify_tag_first=False):
     from modules.whatsapp.workflow import setup_attempt_verdict
 
     trace = tools.browser.trace
@@ -172,7 +234,18 @@ async def run_page1_fields(tools, recover):
         else:
             if field == 'business_number':
                 await tools.observe()
-            result = await apply_known_field(tools, field)
+            if field == 'tag' and verify_tag_first:
+                await tools.observe(strategy='dom')
+                tag_readback = await deterministic_readback(tools, fields=('tag',))
+                if tag_readback['fields'].get('tag') is True:
+                    result = {'ok': True}
+                else:
+                    choices = controls_for(tools, field)
+                    result = (await choose_dropdown(tools, field, choices[0], retry_closed=True)
+                              if len(choices) == 1 and tools.binding(field).kind == 'combobox'
+                              else blocked('TAG_CHIP_PICKER_NOT_BOUND'))
+            else:
+                result = await apply_known_field(tools, field)
             tag_picker_decided = field == 'tag' and result.get('error') in {
                 'OWNED_MENU_EXACT_OPTION_NOT_OBSERVED', 'EXACT_EXISTING_OPTION_NOT_UNIQUE',
                 'EXACT_EXISTING_TAG_ADD_CONTROL_NOT_BOUND',

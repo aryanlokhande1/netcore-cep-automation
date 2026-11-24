@@ -152,13 +152,28 @@ def request_usage(trace,start=0,stop=None,*,role='doer'):
 
 def validate_human_assisted_authorization(args,configured_request_cap):
     """Require explicit one-run permissions and allocate only the fixed request caps."""
-    required=('authorized_live','authorized_inference','authorized_candidate_evaluation')
+    if (getattr(args, 'reconcile_run', None) or getattr(args, 'dashboard_handoff_only', False)
+            or getattr(args, 'unattended_read_only', False)):
+        if not getattr(args,'authorized_live',False) or not getattr(args,'authorized_inference',False):
+            raise ConfigurationError('Read-only reconciliation requires explicit live Login authorization')
+        sms_preview = getattr(args, 'through_preview', False) and getattr(args, 'dashboard_handoff_only', False)
+        teacher = 2 if sms_preview else int(bool(getattr(args, 'sms_teacher', False) and getattr(args, 'dashboard_handoff_only', False)))
+        login=min(getattr(args,'login_api_budget',6),getattr(args,'total_api_budget',6)-teacher,configured_request_cap-teacher)
+        if login<1 or getattr(args,'task_api_budget',0)!=0:
+            raise ConfigurationError('Read-only reconciliation requires a Login-only request budget')
+        task = min(getattr(args, 'total_api_budget', 6), configured_request_cap) - login - teacher if sms_preview else 0
+        if sms_preview and (login > 8 or task < 14):
+            raise ConfigurationError('SMS Preview requires at most eight Login requests and room for fourteen task requests')
+        return {'login':login,'task':task,'observer':0,'teacher':teacher,'total':login+teacher+task}
+    required=('authorized_live','authorized_inference')
+    if not getattr(args, 'unattended_config', None):
+        required += ('authorized_candidate_evaluation',)
     if any(getattr(args,name,False) is not True for name in required):
         raise ConfigurationError('Explicit live, inference and candidate-evaluation authorization is required')
     if type(configured_request_cap) is not int or configured_request_cap < 1:
         raise ConfigurationError('Configured request cap is invalid')
     if getattr(args,'authorized_learning',False) or hasattr(args,'total_api_budget'):
-        teacher=int(getattr(args,'authorized_learning',False))
+        teacher=(3 if getattr(args,'ga_teacher_inspection',False) else 1) if getattr(args,'authorized_learning',False) else 0
         total=min(getattr(args,'total_api_budget',20),configured_request_cap)
         login=getattr(args,'login_api_budget',6)
         task=getattr(args,'task_api_budget',12)
@@ -179,6 +194,10 @@ def validate_human_assisted_authorization(args,configured_request_cap):
 
 
 def human_assisted_output_budget(settings, caps, *, writable=False):
+    if not caps['task']:
+        if settings.cycle_output < caps['login'] * settings.login_output + caps['teacher'] * settings.teacher_output:
+            raise ConfigurationError('The configured output budget cannot reserve Login and review requests')
+        return 0
     reserved = caps['login'] * settings.login_output + caps['teacher'] * settings.teacher_output
     task_output = min(2048, (settings.cycle_output - reserved) // caps['task'])
     minimum = 1536 if writable else 1
@@ -680,7 +699,7 @@ def compact_human_assisted_teacher_evidence(package):
     result = {key: package.get(key) for key in (
         'task_scope', 'goal', 'execution_facts', 'login_verification', 'authentication_verified',
         'task_doer_invoked', 'analysis_only', 'status', 'failure', 'skill_sha256', 'candidate_version',
-        'review_kind', 'pre_cleanup_evidence', 'tool_schema_rejections')}
+        'review_kind', 'pre_cleanup_evidence', 'tool_schema_rejections', 'ga_setup_fields', 'mcp_redacted_trace')}
     observer = package.get('observer', [])[-1:]
     strategy_lines = (package.get('skill') or '').splitlines()
     excerpt = []
@@ -706,7 +725,7 @@ def compact_human_assisted_teacher_evidence(package):
     return result
 
 
-async def review_v2_attempt(ctx,state,authorization,payload,*,analysis_only=False):
+async def review_v2_attempt(ctx,state,authorization,payload,*,analysis_only=False,live_evidence=None):
     """Shared genuine Teacher path; consumes sanitized evidence, never browser actions."""
     import hashlib
     from deep_agents.teacher import create_teacher
@@ -769,7 +788,8 @@ async def review_v2_attempt(ctx,state,authorization,payload,*,analysis_only=Fals
                 if kind == 'dom_observation':
                     observed = event.get('result', {})
                     card = {key: observed[key] for key in ('stage','field_evidence','binding_failures','scope_basis',
-                            'audience_picker_evidence','audience_section_evidence','content_preview_evidence') if key in observed}
+                            'audience_picker_evidence','audience_section_evidence','content_preview_evidence',
+                            'ga_card_evidence') if key in observed}
                 else:
                     card = {key: event[key] for key in ('stage','field','status','reason','code','results_hidden',
                             'source_step','destination_step','readback','expected_count','matched_count','evidence_ref','approaches',
@@ -779,6 +799,10 @@ async def review_v2_attempt(ctx,state,authorization,payload,*,analysis_only=Fals
             latest = [card for card in browser_cards if card['kind'] in decisive][-7:]
             selected_refs = [card for card in browser_cards if card['kind'] not in decisive][-6:]
             package['browser_observer_evidence'] = selected_refs + latest
+        if getattr(tools, 'ga_setup_fields', None):
+            package['ga_setup_fields'] = tools.ga_setup_fields
+        if ctx.get('mcp_teacher_trace'):
+            package['mcp_redacted_trace'] = ctx['mcp_teacher_trace']
         package=trace.redact_agent(package)
         evidence_bytes=json.dumps(package,sort_keys=True).encode('utf-8')
         (ctx['directory']/'teacher-input-evidence.json').write_bytes(evidence_bytes)
@@ -788,17 +812,60 @@ async def review_v2_attempt(ctx,state,authorization,payload,*,analysis_only=Fals
         sent = package
         if ctx.get('human_assisted'):
             sent = compact_human_assisted_teacher_evidence(package)
+            if live_evidence:
+                retained = sent.get('pre_cleanup_evidence') or {}
+                sent['pre_cleanup_evidence'] = {key: retained.get(key) for key in ('status','path')}
+                sent['browser_observer_evidence'] = sent['browser_observer_evidence'][-3:]
             ids = sent['evidence_ids']
             ctx['evidence_ids'] = ids
             (ctx['directory']/'teacher-request-evidence.json').write_bytes(canonical(sent).encode('utf-8'))
-        agent,_=create_teacher(ctx['teacher'],trace,ctx['budget'],schema=V2Lesson,
-            prompt_override='For a completed run, summarize what worked and return no instructions. For an analysis_only run, return no instructions. Review real execution evidence only. Echo the supplied deterministic execution_facts exactly. Empty WhatsApp events do not mean Login/browser actions did not occur: inspect login_execution_evidence and login_verification. Cite evidence_ids, including at least one actual Login action when present; trace:N refers to original event index N. Never deny recorded browser activity. Classify defects honestly; tool/controller defects require code_fix_required. Propose concise procedural candidate instructions only when justified. Recommend code repairs as bounded file/function descriptions in recommended_code_repairs; never apply them. No selectors, URLs, private values, source edits, task changes or permission relaxation. No executable tools. Never claim an unconsumed candidate improved execution.')
+        prompt = ('For a completed run, summarize what worked and return no instructions. For an analysis_only run, return no instructions. Review real execution evidence only. Echo the supplied deterministic execution_facts exactly. Empty WhatsApp events do not mean Login/browser actions did not occur: inspect login_execution_evidence and login_verification. Cite evidence_ids, including at least one actual Login action when present; trace:N refers to original event index N. Never deny recorded browser activity. Propose concise procedural candidate instructions only when justified. Recommend code repairs as bounded file/function descriptions in recommended_code_repairs; never apply them. No selectors, URLs, private values, source edits, task changes or permission relaxation. Never claim an unconsumed candidate improved execution.')
+        if live_evidence:
+            prompt += (' Call inspect_ga_setup first. Compare its structure, visibility and label associations with the scope that failed. '
+                       'Cite its evidence_ref. If the DOM leaves layout or visibility unresolved, call view_ga_setup once with the precise reason. '
+                       'State what the image added and use the DOM crosscheck. If a supported existing procedure can bind and verify the failed control, '
+                       'describe a fresh-run test and propose typed instructions. For existing unique GA bindings, '
+                       'ga_scoped_control_bound supports type and verify with a fresh reference. Use code_fix_required only when the observed '
+                       'evidence proves a missing binding or action capability. In that case cite the evidence and name the function and missing rule. '
+                       'If evidence is inconclusive, return no instructions and give the unresolved predicate. Observation tools grant no write access.')
+        if ctx.get('teacher_mcp_tools'):
+            prompt += (' The trace was fetched over MCP. In your typed procedures, action NAME maps to browser_NAME. '
+                       'State the observed control under Advanced, Google Analytics tracking, and what the independent_readback '
+                       'must verify. If you need an unlisted capability, report the gap instead of proposing an unsupported action.')
+
+        def retain_diagnosis(response):
+            from modules.whatsapp.diagnostic_artifacts import _write_json
+
+            if ctx.get('teacher_diagnosis_retained'):
+                return
+            if hasattr(response, 'model_dump'):
+                response = response.model_dump()
+            path = 'teacher-final-diagnosis.json'
+            _write_json(ctx['directory'], path, {'state':'RETURNED_PENDING_VALIDATION','diagnosis':response}, trace)
+            ctx['teacher_diagnosis_retained'] = True
+            trace.agent_event('teacher_diagnosis_retained', role='teacher', evidence_ref=path,
+                              status='RETURNED_PENDING_VALIDATION')
+
+        observation_tools = (ctx['teacher_mcp_tools'] if 'teacher_mcp_tools' in ctx else
+                             live_evidence.registered() if live_evidence else ())
+        agent,_=create_teacher(ctx['teacher'],trace,ctx['budget'],schema=V2Lesson,prompt_override=prompt,
+            observation_tools=observation_tools,
+            retain_diagnosis=retain_diagnosis if live_evidence else None)
         from langsmith import tracing_context
         with tracing_context(enabled=False):
             reviewed=await agent.ainvoke({'messages':[{'role':'user','content':canonical(sent)}]},
-                {'configurable':{'thread_id':trace.run_id+'-teacher'},'recursion_limit':6})
+                {'configurable':{'thread_id':trace.run_id+'-teacher'},'recursion_limit':12 if live_evidence else 6})
+        if live_evidence:
+            retain_diagnosis(reviewed['structured_response'])
         lesson=V2Lesson.model_validate(reviewed['structured_response'])
+        if live_evidence:
+            ids = [*ids, *live_evidence.refs]
+            ctx['evidence_ids'] = ids
+            if live_evidence.dom:
+                ctx['ga_binding_evidence'] = {'id':live_evidence.dom['evidence_ref'], 'result':live_evidence.dom}
         rejection='TEACHER_EVIDENCE_INVALID' if not set(lesson.evidence_refs)<=set(ids) else None
+        if live_evidence and (not live_evidence.dom or live_evidence.dom['evidence_ref'] not in lesson.evidence_refs):
+            rejection='TEACHER_OMITTED_LIVE_GA_DOM'
         if lesson.execution_facts is None or lesson.execution_facts.model_dump()!=actual:
             rejection='TEACHER_EXECUTION_FACTS_CONTRADICT_EVIDENCE'
         if actual['login_tool_calls'] and not set(lesson.evidence_refs)&login_action_refs:
@@ -831,7 +898,10 @@ async def review_v2_attempt(ctx,state,authorization,payload,*,analysis_only=Fals
         trace.teacher_result='ANALYZED'
     except Exception as error:
         from deep_agents.permissions import model_failure_details
+        from langgraph.errors import GraphRecursionError
         ctx['teacher_validation']=model_failure_details(error,next((d for d in reversed(trace.model_diagnostics) if d.get('role')=='teacher'),{}))
+        if isinstance(error, GraphRecursionError):
+            ctx['teacher_validation']['code']='TEACHER_GRAPH_STEP_LIMIT'
         trace.teacher_result='ANALYSIS_REJECTED' if ctx.get('teacher_rejection') else 'ANALYSIS_UNAVAILABLE'
         trace.agent_event('teacher_unavailable',role='teacher',error=type(error).__name__,failure=ctx['teacher_validation'],status=trace.teacher_result)
     return {'route':'candidate'}
@@ -843,13 +913,24 @@ async def store_v2_candidate(ctx,state,authorization,payload,ui,task_digest):
     tools=ctx.get('tools');lesson=ctx.get('lesson')
     if authorization.learning and lesson and not (tools and (tools.terminal or tools.pending_write)) and not state.get('failure',{}).get('unsafe'):
         try:
+            if getattr(tools, 'ga_setup_fields', None) and lesson.instructions:
+                failed_field = (state.get('failure') or {}).get('field')
+                if (failed_field not in tools.ga_setup_fields or any(
+                        step.goal != 'setup' or step.field not in {None, failed_field}
+                        or step.action not in {'observe', 'dom', 'inspect', 'scroll', 'verify', 'type'}
+                        for step in lesson.instructions)):
+                    ctx['candidate_error'] = 'CANDIDATE_OUTSIDE_OBSERVED_GA_FIELD_FAILURE'
+                    ctx['trace'].agent_event('candidate_update', status=ctx['candidate_error'])
+                    return {'route':'cleanup'}
             if authorization.manual_form_test and any(step.goal!='setup' or
                     step.action=='screenshot' and not authorization.vision for step in lesson.instructions):
                 ctx['candidate_error']='CANDIDATE_OUTSIDE_MANUAL_SETUP_SCOPE'
                 ctx['trace'].agent_event('candidate_update',status=ctx['candidate_error'])
                 return {'route':'cleanup'}
             saved=save_whatsapp_candidate(lesson,run_id=ctx['trace'].run_id,parent=ctx['skill'],
-                task_digest=task_digest,evidence_refs=ctx['evidence_ids'],payload=payload,ui=ui)
+                task_digest=task_digest,evidence_refs=ctx['evidence_ids'],payload=payload,ui=ui,
+                ga_binding_evidence=ctx.get('ga_binding_evidence'),
+                **({'ga_switch_only': True} if ctx.get('mcp_switch_candidate') else {}))
             ctx['candidate_result']=saved
             ctx['trace'].agent_event('candidate_update',candidate=saved,
                 change_summary=ctx.get('teacher_review',{}).get('change_summary'),
@@ -865,6 +946,7 @@ async def store_v2_candidate(ctx,state,authorization,payload,ui,task_digest):
 async def run_v2(args):
     """The only supported WhatsApp lifecycle. No external call before preflight."""
     import hashlib
+    from contextlib import nullcontext
     from typing import TypedDict
     from langgraph.graph import StateGraph,START,END
     from langgraph.checkpoint.memory import InMemorySaver
@@ -889,7 +971,17 @@ async def run_v2(args):
 
     authorization=V2Authorization(**{k:getattr(args,'authorized_'+k,False) for k in V2Authorization.model_fields})
     authorization.require_run(args.iterations)
-    if args.iterations!=1:
+    mcp_mode = getattr(args, 'browser_mode', 'direct') == 'mcp'
+    if mcp_mode:
+        try:
+            from app.browser_mcp_client import open_step
+            from modules.whatsapp.mcp_steps import (GA_TEACHER_STEP, LOGIN_STEP, OBSERVER_STEPS, doer_step,
+                login_document, require_retry_candidate, retry_candidate, write_strategy)
+        except ImportError:
+            raise V2Stop('MCP_DEPENDENCY_UNAVAILABLE', owner='environment') from None
+        if args.iterations not in (1, 2) or args.iterations == 2 and not authorization.candidate_evaluation:
+            raise V2Stop('MCP_RETRY_REQUIRES_EXPLICIT_CANDIDATE_EVALUATION', owner='authorization')
+    elif args.iterations!=1:
         raise V2Stop('ONE_LIVE_ITERATION_PER_OPERATOR_LAUNCH',owner='authorization')
     payload,task_digest=load_v2_payload(args.payload,approved_digest=args.approve_payload_sha256)
     payload.check_schedule()  # Intentionally unresolved input blocks before config/login/inference.
@@ -927,6 +1019,8 @@ async def run_v2(args):
         status:str
         route:str
         candidate:str|None
+        candidate_sha256:str
+        strategy_sha256:str
         turns:int
         failure:dict
         finding:dict
@@ -957,12 +1051,22 @@ async def run_v2(args):
         directory=ROOT/'outputs'/'whatsapp-v2'/trace.run_id;directory.mkdir(parents=True,exist_ok=False);ctx['directory']=directory
         try:
             remaining=args.total_api_budget-total_requests
-            if remaining<3:raise V2Stop('FINAL_REVIEW_BUDGET_RESERVED')
-            budget=InferenceBudget(remaining,reserve_teacher=True,
-                role_limits={'doer':remaining-2,'observer':remaining-2,'teacher':1})
-            budget.token_pool=token_pool;budget.teacher_reserve_input=settings.teacher_input;budget.teacher_reserve_output=settings.teacher_output
+            teacher_requests = 3 if mcp_mode and authorization.learning else 1
+            if remaining < teacher_requests + 2:raise V2Stop('FINAL_REVIEW_BUDGET_RESERVED')
+            budget=InferenceBudget(remaining,reserve_teacher=True, teacher_request_reserve=teacher_requests,
+                role_limits={'doer':remaining-teacher_requests-1,'observer':remaining-teacher_requests-1,'teacher':teacher_requests})
+            budget.token_pool=token_pool
+            budget.teacher_reserve_input=settings.teacher_input*teacher_requests
+            budget.teacher_reserve_output=settings.teacher_output*teacher_requests
             ctx['budget']=budget
             ctx['skill']=whatsapp_skill(candidate=state.get('candidate'),evaluate=authorization.candidate_evaluation,task_digest=task_digest,ui=ui)
+            if mcp_mode and state.get('candidate_sha256'):
+                from learning.skill_storage.registry import whatsapp_history
+
+                ctx['mcp_strategy'] = require_retry_candidate(ctx['skill'], state['candidate_sha256'], state['strategy_sha256'],
+                                                               whatsapp_history()/'candidates'/state['candidate'])
+                trace.agent_event('mcp_retry_candidate_verified', content_sha256=ctx['skill'].digest,
+                                  strategy_sha256=state['strategy_sha256'], next_stage='login')
             (directory/'loaded-SKILL.md').write_bytes(ctx['skill'].content.encode('utf-8'))
             trace.strategy_version=ctx['skill'].digest
             trace.agent_event('skill_selected',version=state.get('candidate') or ctx['skill'].metadata.get('version') or ctx['skill'].metadata.get('source_version'),content_sha256=ctx['skill'].digest,
@@ -999,7 +1103,9 @@ async def run_v2(args):
                 trace.agent_event('login_model_configuration',role='doer',max_output_tokens=login_model.max_tokens,reasoning_effort='low')
                 result=await _execute_doer(browser,login,DEFAULT_TASK,login_model,budget,False,
                     SkillStore().snapshot(),close_session=False,login_timeout=config.timeout_seconds,
-                    after_login=review_existing_login if review_login else None)
+                    after_login=review_existing_login if review_login else None,
+                    **({'login_scope': lambda: open_step(login, LOGIN_STEP, document_identity=login_document, login=True)}
+                       if mcp_mode else {}))
                 ctx['login_result']=result
             finally:
                 budget.role_limits['doer']=original_limit
@@ -1011,6 +1117,8 @@ async def run_v2(args):
                     'execution_failure':result.get('execution_failure'),
                     'findings':browser.verification_details}
                 trace.agent_event('login_verification',role='doer',**ctx['login_verification'])
+                if mcp_mode and str(result.get('error', '')).startswith('MCP_'):
+                    raise V2Stop(result['error'], owner='tool', unsafe=True)
                 raise login_execution_stop(result)
             from modules.login.evidence import stable_authentication
             authenticated_observation=await stable_authentication(browser)
@@ -1030,6 +1138,8 @@ async def run_v2(args):
             trace.agent_stage='setup';trace.agent_phase='controller'
             browser.login_page=browser.page
             tools=V2BrowserTools(browser,payload,ui,authorization,directory);ctx['tools']=tools
+            if mcp_mode:
+                tools.mcp_ga_scope = True
             trace.agent_event('task_tools_initialized',authentication_verified=True,
                 session_reused=True,status='CONSTRUCTED_NOT_YET_INVOKED')
             try:ui.require_record()
@@ -1070,21 +1180,23 @@ async def run_v2(args):
             ctx['turn_start']=len(tools.events)
             await tools.protect()
             current=None  # Recognition is performed by the Doer's browser tool.
-            agent=create_v2_doer(ctx['doer'],tools,ctx['trace'],ctx['budget'],ctx['skill'])
-            ctx['trace'].agent_event('task_doer_initialized',role='doer',
-                authentication_verified=ctx['authentication_verified'],status='CONSTRUCTED_NOT_YET_INVOKED')
-            ctx['task_skill_read']=True
-            ctx['trace'].agent_event('skill_loaded',role='doer',version=state.get('candidate') or ctx['skill'].metadata.get('version') or ctx['skill'].metadata.get('source_version'),
-                content_sha256=ctx['skill'].digest,bytes_verified=True,loaded_into_task_prompt=True,
-                provider_consumption='SEE_SUBSEQUENT_DISPATCH_AND_MODEL_RESULT')
-            from langsmith import tracing_context
-            with tracing_context(enabled=False):
-                result=await agent.ainvoke({'messages':[{'role':'user','content':json.dumps({
-                    'goal':state['stage'],'expected':{k:getattr(payload,k) for k in STAGE_FIELDS[state['stage']]},
-                    'observation':current,'feedback':state.get('finding'),'history':tools.events[-12:],
-                    'mode':'AUTHENTICATED_READ_ONLY_UI_DISCOVERY' if tools.read_only else 'APPROVED_DRAFT_FIELDS',
-                    'failed_approaches':{str(field):sorted(methods) for (stage,field),methods in tools.failed_approaches.items() if stage==state['stage']}})}]},
-                    {'configurable':{'thread_id':ctx['trace'].run_id+'-'+str(state['turns'])},'recursion_limit':20})
+            async with (open_step(tools, doer_step(tools)) if mcp_mode else nullcontext()) as client:
+                agent=create_v2_doer(ctx['doer'],tools,ctx['trace'],ctx['budget'],ctx['skill'],
+                    **({'mcp_tools': client.agent_tools(), 'mcp_strategy': ctx.get('mcp_strategy', '')} if client else {}))
+                ctx['trace'].agent_event('task_doer_initialized',role='doer',
+                    authentication_verified=ctx['authentication_verified'],status='CONSTRUCTED_NOT_YET_INVOKED')
+                ctx['task_skill_read']=True
+                ctx['trace'].agent_event('skill_loaded',role='doer',version=state.get('candidate') or ctx['skill'].metadata.get('version') or ctx['skill'].metadata.get('source_version'),
+                    content_sha256=ctx['skill'].digest,bytes_verified=True,loaded_into_task_prompt=True,
+                    provider_consumption='SEE_SUBSEQUENT_DISPATCH_AND_MODEL_RESULT')
+                from langsmith import tracing_context
+                with tracing_context(enabled=False):
+                    result=await agent.ainvoke({'messages':[{'role':'user','content':json.dumps({
+                        'goal':state['stage'],'expected':{k:getattr(payload,k) for k in STAGE_FIELDS[state['stage']]},
+                        'observation':current,'feedback':state.get('finding'),'history':tools.events[-12:],
+                        'mode':'AUTHENTICATED_READ_ONLY_UI_DISCOVERY' if tools.read_only else 'APPROVED_DRAFT_FIELDS',
+                        'failed_approaches':{str(field):sorted(methods) for (stage,field),methods in tools.failed_approaches.items() if stage==state['stage']}})}]},
+                        {'configurable':{'thread_id':ctx['trace'].run_id+'-'+str(state['turns'])},'recursion_limit':20})
             ctx['report']=result['structured_response'].model_dump()
             ctx['trace'].agent_event('doer_report',role='doer',result=ctx['report'])
             return {'turns':state['turns']+1,'route':'observer','route_reason':'DOER_TURN_REQUIRES_INDEPENDENT_READBACK'}
@@ -1097,8 +1209,9 @@ async def run_v2(args):
             attempted=tools.events[ctx.get('turn_start',0):]
             force=tools.read_only or ctx.get('report',{}).get('status') in {'VERIFY','STUCK','BLOCKED'} or any(not e['ok'] or e['action']=='select' for e in attempted)
             prior=ctx['stage_records'].get(state['stage'],{})
-            finding,facts=await observe_goal(tools,ctx['observer'],ctx['trace'],ctx['budget'],attempted,
-                force_interpretation=force,prior_facts=prior)
+            async with (open_step(tools, OBSERVER_STEPS[tools.stage]) if mcp_mode else nullcontext()) as client:
+                finding,facts=await observe_goal(tools,ctx['observer'],ctx['trace'],ctx['budget'],attempted,
+                    force_interpretation=force,prior_facts=prior, **({'mcp_client':client} if client else {}))
             progressed_fields=[field for field,ok in facts['fields'].items() if ok and prior.get('fields',{}).get(field) is not True]
             for field in progressed_fields:tools.failed_approaches.pop((state['stage'],field),None)
             ctx['stage_records'][state['stage']]=facts
@@ -1144,9 +1257,12 @@ async def run_v2(args):
         tools=ctx['tools']
         try:
             # Revalidate after Observer await; controller-only certificate is one-use.
-            fresh=await deterministic_readback(tools)
+            async with (open_step(tools, OBSERVER_STEPS[tools.stage]) if mcp_mode else nullcontext()) as client:
+                fresh=(await client.read('independent_readback') if client else await deterministic_readback(tools))
             if not fresh['stage_visible'] or not all(fresh['fields'].values()) or not all(fresh['checks'].values()):raise V2Stop('STAGE_CERTIFICATE_STALE',owner='recognition')
             tools.next_allowed=True
+            if mcp_mode and tools.stage == 'schedule':
+                ctx['save_may_have_landed'] = True
             result=await tools.advance()
             next_stage=STAGES[STAGES.index(state['stage'])+1]
             tools.stage=next_stage;tools.references.clear();tools.images.clear()
@@ -1154,13 +1270,82 @@ async def run_v2(args):
             return {'stage':next_stage,'route':'observer','status':'INCOMPLETE',
                 'route_reason':'PERSISTENCE_INDEPENDENTLY_VERIFIED_REOBSERVE_NEXT_STAGE'}
         except (Exception,KeyboardInterrupt,asyncio.CancelledError) as error:
+            if mcp_mode and ctx.get('save_may_have_landed') and not isinstance(error,(KeyboardInterrupt,asyncio.CancelledError)):
+                return {'status':'BLOCKED','failure':failure(error),'route':'reconcile'}
             return {'status':'BLOCKED','failure':failure(error),'route':'teacher'}
 
+    async def reconcile(state):
+        from app.browser_mcp_client import StepTools
+
+        tools = ctx['tools']
+        try:
+            async with open_step(tools, StepTools('observer', tools.stage, frozenset({'reconcile'}))) as client:
+                record = await client.read('persisted_record_readback')
+            fields = record.get('fields') or {}
+            expected = set().union(*map(set, STAGE_FIELDS.values()))
+            verified = (record.get('available') is True and record.get('count') == 1 and record.get('draft') is True
+                        and all(fields.get(field) is True for field in expected))
+            ctx['trace'].agent_event('mcp_save_reconciliation', role='observer',
+                                     status='VERIFIED_SAVED_DRAFT' if verified else 'SAVE_OUTCOME_UNCONFIRMED',
+                                     evidence_ref=record.get('evidence_ref'))
+            if verified:
+                return {'route':'cleanup','status':'VERIFIED_SAVED_DRAFT','failure':{}}
+        except V2Stop as error:
+            ctx['trace'].agent_event('mcp_save_reconciliation', role='observer', status=error.code)
+        return {'route':'cleanup','status':'BLOCKED','failure':{
+            'code':'MCP_SAVE_OUTCOME_UNCONFIRMED_NO_RETRY','owner':'uncertain_write','unsafe':True}}
+
     async def teacher(state):
+        if mcp_mode:
+            tools = ctx.get('tools')
+            stop = state.get('failure') or {}
+            approaches = stop.get('failed_approaches', {}).get('ga_tracking', ())
+            if (not tools or state['status'] != 'STUCK' or tools.stage != 'setup' or len(set(approaches)) < 2
+                    or stop.get('unsafe') or tools.terminal or tools.pending_write or not authorization.learning
+                    or not tools.ui.stage_selectors.get('setup')):
+                ctx['trace'].agent_event('mcp_teacher_evidence_unavailable', role='teacher',
+                    status='HELD_GA_SETUP_REQUIRED', stage=state['stage'])
+                return await review_v2_attempt(ctx,state,authorization,payload,analysis_only=True)
+            from modules.whatsapp.ga_teacher_evidence import GATeacherEvidence
+
+            try:
+                held = GATeacherEvidence(tools, await tools.protect())
+                async with open_step(tools, GA_TEACHER_STEP, held_ga=held) as client:
+                    ctx['mcp_teacher_trace'] = await client.read('redacted_trace', {'limit': 20})
+                    ctx['teacher_mcp_tools'] = client.agent_tools({'inspect_ga_setup','view_ga_setup'})
+                    return await review_v2_attempt(ctx,state,authorization,payload,live_evidence=held)
+            except V2Stop as error:
+                ctx['trace'].agent_event('mcp_teacher_evidence_unavailable', role='teacher', status=error.code)
+                return {'status':'BLOCKED','failure':failure(error),'route':'cleanup'}
+            finally:
+                ctx.pop('teacher_mcp_tools', None)
         return await review_v2_attempt(ctx,state,authorization,payload)
 
     async def candidate(state):
-        return await store_v2_candidate(ctx,state,authorization,payload,ui,task_digest)
+        if not mcp_mode:
+            return await store_v2_candidate(ctx,state,authorization,payload,ui,task_digest)
+        lesson = ctx.get('lesson')
+        tools = ctx.get('tools')
+        if not lesson or not lesson.instructions:
+            return {'route':'cleanup'}
+        observation = (ctx.get('ga_binding_evidence') or {}).get('result', {})
+        from modules.whatsapp.ga_teacher_evidence import scoped_ga_switch_observed
+
+        available = doer_step(tools).operations
+        if (not scoped_ga_switch_observed(observation) or any(step.action not in available or step.goal != 'setup'
+                                     or step.field not in {None, 'ga_tracking'} for step in lesson.instructions)):
+            ctx['candidate_error'] = 'MCP_GA_BINDING_OR_ACTION_CAPABILITY_NOT_ESTABLISHED'
+            ctx['trace'].agent_event('candidate_update', status=ctx['candidate_error'])
+            return {'route':'cleanup'}
+        ctx['mcp_switch_candidate'] = True
+        update = await store_v2_candidate(ctx,state,authorization,payload,ui,task_digest)
+        if ctx.get('candidate_result'):
+            from learning.skill_storage.registry import whatsapp_history
+
+            ctx['strategy_sha256'] = write_strategy(ctx['candidate_result'], ctx['skill'], lesson,
+                                                   whatsapp_history(), 'ga_tracking')
+            ctx['candidate_result']['strategy_sha256'] = ctx['strategy_sha256']
+        return update
 
     async def cleanup(state):
         nonlocal total_requests
@@ -1213,7 +1398,10 @@ async def run_v2(args):
         if state.get('failure',{}).get('unsafe') or (tools and (tools.pending_write or tools.terminal)):safe=False
         if tools and tools.read_only:safe=False
         again=safe and authorization.fresh_iterations and state['iteration']<args.iterations and total_requests<args.total_api_budget
-        return {'route':'start' if again else 'end','route_reason':'AUTHORIZED_FRESH_ITERATION_SAFE_WITHIN_BUDGET' if again else 'RUN_STOPPED_NO_AUTHORIZED_SAFE_ITERATION'}
+        restart = retry_candidate(ctx,state,authorization) if mcp_mode and again else {}
+        if mcp_mode and not restart:
+            again = False
+        return {**restart,'route':'start' if again else 'end','route_reason':'AUTHORIZED_FRESH_ITERATION_SAFE_WITHIN_BUDGET' if again else 'RUN_STOPPED_NO_AUTHORIZED_SAFE_ITERATION'}
 
     def traced_node(name,node):
         async def invoke(state):
@@ -1247,6 +1435,8 @@ async def run_v2(args):
 
     graph=StateGraph(State)
     nodes={'start':start,'doer':doer,'observer':observer,'advance':advance,'teacher':teacher,'candidate':candidate,'cleanup':cleanup}
+    if mcp_mode:
+        nodes['reconcile'] = reconcile
     for name,node in nodes.items():graph.add_node(name,traced_node(name,node))
     graph.add_edge(START,'start')
     for name in nodes:graph.add_conditional_edges(name,choose_route,{**{n:n for n in nodes},'end':END})
@@ -1289,10 +1479,10 @@ async def run_v2(args):
 
 
 def setup_field_write_status(event):
-    from modules.whatsapp.contract import STAGE_FIELDS
+    from modules.whatsapp.contract import GA_SETUP_FIELDS, STAGE_FIELDS
 
     field = event.get('field')
-    if event.get('stage') != 'setup' or event.get('action') not in {'type', 'select'} or field not in STAGE_FIELDS['setup']:
+    if event.get('stage') != 'setup' or event.get('action') not in {'type', 'select'} or field not in (*STAGE_FIELDS['setup'], *GA_SETUP_FIELDS):
         return None
     actual = (event.get('verification') or {}).get('actual_match')
     verified = event.get('ok') is True and actual is True
@@ -1319,7 +1509,8 @@ def setup_attempt_verdict(tools,facts):
               if stage == tools.stage and len(methods) >= 2
               and (fields.get(field) is not True or (field == 'campaign_name' and campaign_write_pending))}
     next_field = 'campaign_name' if campaign_write_pending else next(
-        (field for field in STAGE_FIELDS[tools.stage] if field in fields and fields[field] is not True), None)
+        (field for field in (getattr(tools, 'ga_setup_fields', None) or STAGE_FIELDS[tools.stage])
+         if field in fields and fields[field] is not True), None)
     if (next_field == 'tag' and 'tag' in failed and fields.get('ga_tracking') is not True
             and 'ga_tracking' not in failed and getattr(tools, 'operator_setup_binding', None) is not None):
         next_field = 'ga_tracking'
@@ -1386,12 +1577,16 @@ async def run_bounded_setup_doer(agent,tools,trace,*,thread_id,goal,max_turns=20
                     'owner':'uncertain_write' if tools.pending_write else getattr(tools,'terminal_owner','recognition'),
                     'unsafe':bool(tools.pending_write or getattr(tools, 'terminal_unsafe', bool(tools.terminal))),
                     'failed_approaches':verdict['failed_approaches']}
+                if getattr(tools, 'ga_setup_fields', None):
+                    verdict['failure']['field'] = verdict['next_required_field']
             return verdict
         if verdict['next_required_field'] == 'campaign_name' and 'campaign_name' not in verdict['written_fields']:
             next_instruction = 'Write Campaign Name and obtain independent readback, including if it already matches. '
         else:
             next_instruction = ''
-        if getattr(tools, 'operator_setup_binding', None) is not None and verdict['next_required_field'] == 'ga_tracking':
+        if getattr(tools, 'ga_setup_fields', None):
+            next_instruction += 'Stay on the active GA field and use the latest control reference from the owned card. '
+        elif getattr(tools, 'operator_setup_binding', None) is not None and verdict['next_required_field'] == 'ga_tracking':
             next_instruction += 'Continue with the independently bound GA Tracking control. Keep any exhausted Tag binding unresolved. '
         feedback_facts = {key: verdict[key] for key in ('next_required_field', 'verified_fields',
                           'written_fields', 'failed_approaches')} if operator_setup else verdict
@@ -1449,8 +1644,9 @@ def human_assisted_review_kind(state, evaluation):
     return 'analysis_only' if failure else None
 
 
-async def run_human_assisted(args):
+async def run_human_assisted(args, *, after_dashboard_handoff=None, before_dashboard_handoff=None):
     """Run one Login attempt, then route to verified or separately consented read-only Doer."""
+    sms_launch = getattr(args, 'command', None) == 'sms-preflight' and after_dashboard_handoff is not None
     import sys
     from dataclasses import replace
     from urllib.parse import urlsplit
@@ -1472,8 +1668,30 @@ async def run_human_assisted(args):
     from app.model_settings import ModelSettings
     from time import monotonic
 
+    unattended = None
+    unattended_config = getattr(args, 'unattended_config', None)
+    unattended_payload = getattr(args, 'unattended_payload', None)
+    if unattended_config or unattended_payload:
+        from modules.whatsapp.unattended import DraftLaunch, claim_save, save_claim_path
+
+        if not (unattended_config and unattended_payload) or any(getattr(args, key, None) for key in (
+                'operator_login', 'operator_confirmed_login', 'reconcile_run', 'manual_form_test',
+                'dashboard_handoff_only', 'page1_through_audience', 'through_schedule', 'through_audience',
+                'one_approval_draft', 'save_schedule_draft', 'preview_draft_validation', 'candidate',
+                'authorized_learning', 'authorized_candidate_evaluation', 'campaigns_diagnostic',
+                'campaigns_reload_once', 'capture_audience_failure')) or getattr(args, 'operator_confirmed_runs', 1) != 1:
+            raise V2Stop('UNATTENDED_MODE_CONFLICTING_ARGUMENTS', owner='authorization')
+        if sys.stdin.isatty():
+            raise V2Stop('UNATTENDED_RUN_REQUIRES_NO_INTERACTIVE_STDIN', owner='authorization')
+        unattended = DraftLaunch.load(unattended_config)
+        args.unattended_read_only = unattended.action == 'READ_DRAFT'
+        if args.unattended_read_only:
+            args.task_api_budget = 0
+        else:
+            args.manual_form_test = args.page1_through_audience = args.through_schedule = True
+            args.one_approval_draft = args.save_schedule_draft = args.preview_draft_validation = True
     validate_human_assisted_authorization(args,24)
-    if not sys.stdin.isatty():
+    if not unattended and not sys.stdin.isatty():
         raise ConfigurationError('Human-assisted diagnostic requires an interactive VS Code terminal')
     review_seconds=getattr(args,'operator_review_seconds',300)
     session_seconds=getattr(args,'session_seconds',900)
@@ -1494,19 +1712,94 @@ async def run_human_assisted(args):
     config = Config.load()
     manual_requested = getattr(args, 'manual_form_test', False)
     operator_confirmed_mode = getattr(args, 'operator_confirmed_login', False)
+    mcp_discovery = getattr(args, 'browser_mode', 'direct') == 'mcp'
+    mcp_name_write = getattr(args, 'mcp_campaign_name_write', False)
+    if mcp_name_write and not (mcp_discovery and manual_requested):
+        raise V2Stop('MCP_CAMPAIGN_NAME_WRITE_REQUIRES_MCP_AND_MANUAL_FORM_TEST', owner='authorization')
+    mcp_ga_setup = getattr(args, 'mcp_ga_setup', False)
+    if mcp_ga_setup and (not mcp_discovery or not manual_requested or mcp_name_write
+                         or not getattr(args, 'ga_teacher_inspection', False)
+                         or not getattr(args, 'authorized_learning', False)):
+        raise V2Stop('MCP_GA_REQUIRES_MCP_MANUAL_SETUP_AND_TEACHER_AUTHORIZATION', owner='authorization')
+    if mcp_discovery:
+        if (not operator_confirmed_mode or unattended or manual_requested != (mcp_name_write or mcp_ga_setup)
+                or getattr(args, 'operator_confirmed_runs', 1) not in ((1, 2, 3) if mcp_ga_setup else (1,))
+                or (not mcp_ga_setup and any(getattr(args, key, False) for key in ('authorized_learning',
+                                                                                'ga_teacher_inspection')))
+                or any(getattr(args, key, False) for key in ('page1_through_audience', 'through_schedule',
+                    'through_audience', 'save_schedule_draft', 'one_approval_draft', 'preview_draft_validation',
+                    'dashboard_handoff_only', 'reconcile_run', 'ga_setup_payload',
+                    'campaign_a_draft', 'campaign_b_draft', 'candidate'))):
+            code = ('MCP_CAMPAIGN_NAME_WRITE_REQUIRES_ONE_OPERATOR_CONFIRMED_SETUP_RUN' if mcp_name_write
+                    else 'MCP_DISCOVERY_REQUIRES_ONE_OPERATOR_CONFIRMED_READ_ONLY_RUN')
+            raise V2Stop(code, owner='authorization')
+        try:
+            from app.browser_mcp_client import StepTools, open_step
+        except ImportError:
+            raise V2Stop('MCP_DEPENDENCY_UNAVAILABLE', owner='environment') from None
     page1 = getattr(args, 'page1_through_audience', False)
+    ga_payload = getattr(args, 'ga_setup_payload', None)
+    ga_digest = getattr(args, 'ga_setup_sha256', None)
+    live_ga_teacher = getattr(args, 'ga_teacher_inspection', False)
+    if live_ga_teacher and not ((ga_payload or mcp_ga_setup) and getattr(args, 'authorized_learning', False)):
+        raise V2Stop('LIVE_GA_TEACHER_REQUIRES_GA_SETUP_AND_LEARNING', owner='authorization')
+    if ga_payload or ga_digest:
+        if (not ga_payload or not re.fullmatch('[a-f0-9]{64}', ga_digest or '')
+                or not operator_confirmed_mode or not manual_requested or unattended or page1
+                or getattr(args, 'operator_confirmed_runs', 1) != 1
+                or any(getattr(args, key, None) for key in ('through_schedule', 'through_audience',
+                    'one_approval_draft', 'save_schedule_draft', 'preview_draft_validation',
+                    'reconcile_run', 'dashboard_handoff_only'))):
+            raise V2Stop('GA_TEST_REQUIRES_EXACT_OPERATOR_CONFIRMED_SETUP_ONLY_SCOPE', owner='authorization')
+    reconcile_run = getattr(args, 'reconcile_run', None)
+    unattended_read_only = bool(unattended and unattended.action == 'READ_DRAFT')
+    reconcile_requested = bool(reconcile_run or unattended_read_only)
+    dashboard_handoff_only = getattr(args, 'dashboard_handoff_only', False)
+    if (after_dashboard_handoff is not None or before_dashboard_handoff is not None) and not dashboard_handoff_only:
+        raise ConfigurationError('A dashboard handoff callback requires the read-only handoff mode')
+    if dashboard_handoff_only and (not operator_confirmed_mode or manual_requested or page1
+                                   or reconcile_run or getattr(args, 'operator_confirmed_runs', 1) != 1
+                                   or any(getattr(args, name, False) for name in (
+                                       'authorized_learning', 'through_schedule', 'through_audience',
+                                       'save_schedule_draft', 'one_approval_draft', 'preview_draft_validation', 'candidate'))):
+        raise ConfigurationError('Dashboard handoff requires one operator-confirmed read-only Login run')
+    campaigns_diagnostic_requested = getattr(args, 'campaigns_diagnostic', False)
+    campaigns_reload_once = getattr(args, 'campaigns_reload_once', False)
+    if campaigns_reload_once and not campaigns_diagnostic_requested:
+        raise ConfigurationError('Campaigns reload requires the read-only diagnostic')
+    if campaigns_diagnostic_requested and not reconcile_run:
+        raise ConfigurationError('Campaigns diagnostics requires the read-only reconciliation launcher')
+    login_doer_required = page1 or reconcile_requested or dashboard_handoff_only or bool(ga_payload) or mcp_discovery
+    if reconcile_run and (not operator_confirmed_mode or manual_requested or page1
+                          or getattr(args,'operator_confirmed_runs',1)!=1
+                          or getattr(args,'authorized_learning',False)):
+        raise ConfigurationError('Reconciliation requires one operator-confirmed read-only run')
+    if reconcile_run:
+        from modules.whatsapp.reconciliation import prior_save_source
+        reconciled_at, reconciliation_digest = prior_save_source(ROOT/'outputs'/'human-assisted',reconcile_run)
     through_schedule = getattr(args, 'through_schedule', False)
     through_audience = getattr(args, 'through_audience', False)
     save_schedule_draft = getattr(args, 'save_schedule_draft', False)
+    one_approval_draft = getattr(args, 'one_approval_draft', False)
+    preview_draft_validation = getattr(args, 'preview_draft_validation', False)
+    draft_label = ('A' if getattr(args, 'campaign_a_draft', False) else
+                   'B' if getattr(args, 'campaign_b_draft', False) else None)
+    if draft_label and not (preview_draft_validation and operator_confirmed_mode and not unattended
+                                 and getattr(args, 'operator_confirmed_runs', 1) == 1):
+        raise V2Stop('STAGED_CAMPAIGN_REQUIRES_ONE_OPERATOR_CONFIRMED_DRAFT', owner='authorization')
+    if preview_draft_validation and not (one_approval_draft and page1 and (operator_confirmed_mode or unattended)):
+        raise ConfigurationError('Preview validation requires the operator-confirmed one-approval draft flow')
+    if one_approval_draft and not save_schedule_draft:
+        raise ConfigurationError('One draft approval requires the explicit Save Draft mode')
     if save_schedule_draft and not through_schedule:
         raise ConfigurationError('Draft save requires the Through Schedule launcher')
     if (through_schedule or through_audience) and not page1 or through_schedule and through_audience:
         raise ConfigurationError('Select one operator-confirmed campaign walkthrough endpoint')
-    if page1 and (not operator_confirmed_mode or not manual_requested or
+    if page1 and (not (operator_confirmed_mode or unattended) or not manual_requested or
                   getattr(args, 'operator_confirmed_runs', 1) != 1):
         raise ConfigurationError('Page 1 through Audience requires one operator-confirmed Setup run')
     operator_login = getattr(args, 'operator_login', False) or operator_confirmed_mode
-    if operator_login and not manual_requested:
+    if operator_login and not manual_requested and not (reconcile_run or dashboard_handoff_only or mcp_discovery):
         raise ConfigurationError('OPERATOR_LOGIN_REQUIRES_MANUAL_FORM_TEST')
     private_evidence_path = getattr(args, 'login_evidence_file', None) or config.evidence_file
     if manual_requested and not private_evidence_path:
@@ -1516,6 +1809,8 @@ async def run_human_assisted(args):
         evidence, evidence_status = None, 'OPERATOR_CONFIRMATION_MODE'
     else:
         evidence, evidence_status = human_assisted_login_evidence(private_evidence_path)
+    if unattended and evidence is None:
+        raise V2Stop(evidence_status, owner='authentication')
     if manual_requested and evidence is None and not operator_login:
         raise ConfigurationError(
             f'{evidence_status} at {private_evidence_path}. Setup requires a reviewed visible dashboard marker, '
@@ -1523,24 +1818,43 @@ async def run_human_assisted(args):
             'The launch stopped before Chromium.')
     settings=ModelSettings.load()
     caps=validate_human_assisted_authorization(args,settings.cycle_requests)
+    if live_ga_teacher:
+        if settings.teacher_requests < 3:
+            raise V2Stop('LIVE_GA_TEACHER_REQUIRES_THREE_RESERVED_REQUESTS', owner='controller')
+        settings = replace(settings, teacher_reasoning='medium')
     if not settings.api_key:
         raise ConfigurationError('OPENAI_API_KEY is required for the authorized live Doer')
     task_output = human_assisted_output_budget(settings, caps, writable=manual_requested)
     trace=Trace(roles=('doer','observer','teacher'))
     trace.reasoner_mode='deepagents_openai_gpt-6-luna'
     trace.enable_agent_trace()
-    trace.teacher_result='NOT_INVOKED' if getattr(args,'authorized_learning',False) else 'NOT_INVOKED_DIAGNOSTIC_ONLY'
+    trace.teacher_result='NOT_INVOKED' if caps['teacher'] else 'NOT_INVOKED_DIAGNOSTIC_ONLY'
     artifact_root=ROOT/'outputs'/'human-assisted'
     artifact_dir=artifact_root/f'login-whatsapp-{trace.run_id}'
     artifact_dir.mkdir(parents=True,exist_ok=False)
+    campaigns_diagnostic = None
+    if campaigns_diagnostic_requested:
+        from modules.whatsapp.campaign_list_diagnostic import CampaignListDiagnostic
+        campaigns_diagnostic = CampaignListDiagnostic(config.expected_host)
     terminal_log_path=artifact_dir/'live-terminal.log'
     terminal_log_path.write_text('',encoding='utf-8')
     quiet_terminal = False
 
     def stream_event(event):
         line=append_live_terminal_event(terminal_log_path,event,trace)
-        if line and not quiet_terminal:
+        if sms_launch:
+            return
+        if line and not quiet_terminal and not draft_label:
             print(line.rstrip(),flush=True)
+        if draft_label and not quiet_terminal:
+            kind = event.get('kind')
+            field = event.get('field')
+            if kind == 'page1_field_result' and event.get('readback') == 'MATCH' and field in {'campaign_name','waba','business_number','tag','ga_tracking'}:
+                print(f'[{draft_label}] Observer | {field.replace("_", " ")} matched', flush=True)
+            if kind == 'schedule_draft_click_result' and event.get('click_result') in {'DISPATCHED','BLOCKED','UNCERTAIN'}:
+                print(f'[{draft_label}] Controller | Save and Preview click attempt - {event["click_result"]}', flush=True)
+            if kind == 'campaign_reconciliation_result' and event.get('status') == 'PERSISTED_DRAFT_MATCH':
+                print(f'[{draft_label}] Observer | Reopened draft and verified saved fields', flush=True)
         if manual_requested and event.get('kind') == 'browser_action':
             status = setup_field_write_status(event)
             if status:
@@ -1556,10 +1870,16 @@ async def run_human_assisted(args):
         session_timeout_seconds=session_seconds,
     )
 
-    print(f'LOGIN_EVIDENCE {evidence_status}', flush=True)
-    if operator_login and evidence is None:
+    if not sms_launch:
+        print(f'LOGIN_EVIDENCE {evidence_status}', flush=True)
+    if unattended:
+        trace.agent_event('unattended_launch_authorized', role='controller', terminal_input=False,
+                          action=unattended.action, payload_sha256=unattended.payload_sha256)
+    elif reconcile_run:
+        print('Read-only campaign reconciliation. Confirm the tenant after the Login Doer signs in.', flush=True)
+    elif operator_login and evidence is None:
         print('Starting manual sign-in. Setup requires independently verified tenant and authenticated access.', flush=True)
-    if evidence is None and not operator_login:
+    if evidence is None and not operator_login and not sms_launch:
         print('Use --login-evidence-file or NETCORE_EVIDENCE_FILE with a reviewed document. '
               'The existing Login evidence review is documented in docs/operations.md '
               'and available through app.cli live --login-only --authorized-live --api-request-budget 6 '
@@ -1574,11 +1894,17 @@ async def run_human_assisted(args):
         evidence_file=private_evidence_path,browser_actions=getattr(args,'browser_actions',300))
     permit=authorize_live(config,True,caps['login'])
     credentials=LocalCredentials.load()
-    skill=module_baseline('whatsapp')
+    if unattended:
+        from modules.login.evidence import reviewed_account
+
+        if reviewed_account(evidence, credentials.account.get_secret_value()) != unattended.tenant:
+            raise V2Stop('REVIEWED_LOGIN_ACCOUNT_NOT_BOUND_TO_APPROVED_TENANT', owner='authentication')
+    skill=None if dashboard_handoff_only else module_baseline('whatsapp')
     baseline_sha = getattr(args, 'baseline_sha256', None)
     candidate_version = getattr(args, 'candidate', None)
     candidate_sha = getattr(args, 'candidate_sha256', None)
-    if baseline_sha is not None and baseline_sha.lower() != skill.digest:
+    unattended_write = unattended is not None and not unattended_read_only
+    if not unattended_write and baseline_sha is not None and (skill is None or baseline_sha.lower() != skill.digest):
         raise ConfigurationError('WHATSAPP_BASELINE_SHA256_MISMATCH')
     if bool(candidate_version) != bool(candidate_sha) or candidate_sha and not re.fullmatch(r'[a-fA-F0-9]{64}', candidate_sha):
         raise ConfigurationError('Use --candidate VERSION together with --candidate-sha256 SHA256')
@@ -1587,24 +1913,88 @@ async def run_human_assisted(args):
                           tenant=setup_parts.path.strip('/').split('/')[0])
     approved_payload = ('a47cf5865bfaccfac9b7a4de7a4fa6ddec074aa21f73c52391e0a6ad89b0361d' if page1
                         else '594cfa8b180477ba5f90f279851e8a8f0fbe1b31123a4b6a758950a8c0cc88ac')
-    if through_audience or through_schedule:
+    if through_audience or through_schedule or reconcile_run:
         approved_payload = 'a4ec605b8f742e8d9406260c8a83a6368614064251089bbc757c088fc6f14302'
     payload_path = ROOT / 'credentials/whatsapp-v2-payload.json'
-    payload, digest = load_v2_payload(payload_path, approved_digest=approved_payload)
-    if save_schedule_draft:
+    validation_digest = 'fe1943b695a1258bfc162a5760e8badb3a0f3ddc7e84bc39d2fedc41b535a8c6'
+    preview_digest = '400ec255dc298472b5944d1e88a9ea87a3271144131c815cdf2a6506f80a252e'
+    if reconcile_run and reconciliation_digest not in (None, validation_digest, preview_digest):
+        raise ConfigurationError('RECONCILIATION_PINNED_DRAFT_PAYLOAD_UNAVAILABLE')
+    if ga_payload:
+        payload_path, approved_payload = Path(ga_payload), ga_digest
+    elif unattended:
+        payload_path, approved_payload = Path(unattended_payload), unattended.payload_sha256
+    elif draft_label:
+        payload_path = ROOT / f'credentials/whatsapp-draft-{draft_label.lower()}.json'
+        approved_payload = {
+            'A': 'd2597209e82151c3bcc5d4196a8da7df7285e1bd34d87a02b475af2fc5e8effe',
+            'B': 'e63c559a3d6e427686806d43eb307f5ed416b7c6ca2501ffb20fe85fef149bdf',
+        }[draft_label]
+    elif mcp_discovery or preview_draft_validation or (reconcile_run and reconciliation_digest == preview_digest):
+        payload_path = ROOT / 'credentials/whatsapp-draft-preview-validation-payload.json'
+        approved_payload = preview_digest
+    elif one_approval_draft or (reconcile_run and reconciliation_digest == validation_digest):
+        payload_path = ROOT / 'credentials/whatsapp-draft-validation-payload.json'
+        approved_payload = validation_digest
+    payload, digest = ((None, None) if dashboard_handoff_only else
+                       load_v2_payload(payload_path, approved_digest=approved_payload))
+    if draft_label:
+        from modules.whatsapp.unattended import DraftLaunch, claim_save, save_claim_path
+        rehearsal_claim = DraftLaunch(origin=setup_ui.origin, tenant=setup_ui.tenant,
+                                      action='SAVE_AND_PREVIEW', payload_sha256=digest)
+        if save_claim_path(ROOT/'outputs', rehearsal_claim, payload).exists():
+            raise V2Stop('PRIOR_DRAFT_SAVE_ATTEMPT_REQUIRES_READ_ONLY_RECONCILIATION', owner='uncertain_write')
+    if unattended_write:
+        skill = whatsapp_skill(task_digest=digest, ui=setup_ui)
+        if baseline_sha is None or baseline_sha.lower() != skill.digest:
+            raise V2Stop('UNATTENDED_APPROVED_WHATSAPP_SKILL_DIGEST_REQUIRED', owner='authorization')
+    strategy_task_digest = digest
+    ga_fields = None
+    if ga_payload:
+        from modules.whatsapp.contract import ga_setup_fields, ga_strategy_scope
+
+        ga_fields = ga_setup_fields(payload)
+        strategy_task_digest = ga_strategy_scope(payload)
+        print('GA_SETUP_PAYLOAD ' + json.dumps({'path': str(payload_path), 'sha256': digest,
+            'campaign_name': payload.campaign_name, 'fields': {k: getattr(payload, k) for k in ga_fields[1:]}}), flush=True)
+        trace.agent_event('ga_setup_payload', role='controller', payload_sha256=digest,
+                          candidate_scope_sha256=strategy_task_digest, fields=ga_fields)
+    prior_claim = unattended_write and save_claim_path(ROOT/'outputs', unattended, payload).exists()
+    if unattended_read_only and payload.schedule_datetime is None:
+        raise V2Stop('SCHEDULE_DATETIME_REQUIRED', owner='authorization')
+    if save_schedule_draft and not unattended_write:
         resolved_schedule = payload.scheduled_local()
         print('SCHEDULE_PAYLOAD ' + json.dumps({'path':str(payload_path),'schedule':resolved_schedule.isoformat(),
             'timezone':payload.timezone}), flush=True)
+    if preview_draft_validation and not unattended_write:
+        print('DRAFT_VALIDATION_INPUT ' + json.dumps({'path': str(payload_path), 'payload_sha256': digest,
+              'campaign_name': payload.campaign_name, 'send_later': resolved_schedule.isoformat(),
+              'timezone': payload.timezone}), flush=True)
     if through_schedule:
         print('CONTENT_PAYLOAD ' + json.dumps({'path': str(payload_path), 'template': payload.template}), flush=True)
     if through_audience or through_schedule:
         print('AUDIENCE_PAYLOAD ' + json.dumps({'path': str(payload_path), 'mode': payload.audience_type,
             'include': payload.audience_values('include_audience'),
             'exclude': payload.audience_values('exclude_audience')}), flush=True)
+    mcp_ga_candidate = getattr(args, 'mcp_ga_retry', None) if mcp_ga_setup else None
+    if mcp_ga_setup and payload.ga_tracking is not False:
+        raise V2Stop('MCP_GA_REQUIRES_PINNED_DISABLED_VALUE', owner='authorization')
     selected_candidate = None
+    mcp_ga_strategy = ''
+    if mcp_ga_candidate:
+        from modules.whatsapp.mcp_steps import require_retry_candidate
+        from learning.skill_storage.registry import whatsapp_history
+
+        version = mcp_ga_candidate['candidate']
+        selected_candidate = whatsapp_skill(candidate=version, evaluate=args.authorized_candidate_evaluation,
+                                            task_digest=digest, ui=setup_ui)
+        mcp_ga_strategy = require_retry_candidate(selected_candidate, mcp_ga_candidate['candidate_sha256'],
+                               mcp_ga_candidate['strategy_sha256'], whatsapp_history() / 'candidates' / version)
+        trace.agent_event('mcp_ga_candidate_loaded', role='controller', version=version,
+                          skill_sha256=selected_candidate.digest, strategy_sha256=mcp_ga_candidate['strategy_sha256'])
     if candidate_version:
         selected_candidate = whatsapp_skill(candidate=candidate_version,
-            evaluate=args.authorized_candidate_evaluation, task_digest=digest, ui=setup_ui)
+            evaluate=args.authorized_candidate_evaluation, task_digest=strategy_task_digest, ui=setup_ui)
         if selected_candidate.digest != candidate_sha.lower():
             raise ConfigurationError('WHATSAPP_CANDIDATE_SHA256_MISMATCH')
         if any(step.get('goal') != 'setup' or step.get('action') == 'screenshot'
@@ -1616,8 +2006,9 @@ async def run_human_assisted(args):
     budget.max_input_tokens=settings.cycle_input
     budget.max_output_tokens=settings.cycle_output
     if caps.get('teacher'):
-        budget.teacher_reserve_input=settings.teacher_input
-        budget.teacher_reserve_output=settings.teacher_output
+        slots = caps['teacher'] if mcp_ga_setup or getattr(args, 'through_preview', False) else 1
+        budget.teacher_reserve_input=slots*settings.teacher_input
+        budget.teacher_reserve_output=slots*settings.teacher_output
     browser=StagehandClient(config,OriginPolicy(set(permit.origins)),trace,
         fixture=False,evidence=evidence,live_permit=permit)
     # Match standalone Login verification for an ordinary reviewed document.
@@ -1785,19 +2176,44 @@ async def run_human_assisted(args):
         nonlocal quiet_terminal
         from browser.protected_tabs import bind_confirmed_primary_tab
         from modules.whatsapp.browser_baseline import reject_security_negatives
-        from modules.whatsapp.destination import navigation_url_difference
+        from modules.whatsapp.destination import landing_route_parts, navigation_url_difference
 
         binding = bind_confirmed_primary_tab(browser, route_allowed=operator_tenant_route_allowed)
         deadline = monotonic() + min(review_seconds, human_assisted_remaining_seconds(session_seconds, context['started']))
         context['last_verified_step'] = 'PROTECTED_TENANT_ROUTE_OBSERVED'
         console = OperatorConsole(event_sink=record_operator_decision)
+        campaigns_wait = min(deadline, monotonic() + 50)
+        campaigns_admin = urlsplit(SETUP_URL).path.split('/campaign/', 1)[0]
+        campaigns_path = campaigns_admin + '/campaign/unified'
+        campaigns_link_clicked = False
+        last_campaigns_facts = None
 
         async def sample():
+            nonlocal last_campaigns_facts
+
             await binding.require_current(browser, allow_document_transition=True)
             url = await browser.page.url()
             if not operator_tenant_route_allowed(url):
                 raise V2Stop('OPERATOR_TENANT_ROUTE_CHANGED', owner='authorization', unsafe=True)
             proof = await human_assisted_session_safety(browser, operator_route=True)
+            if (campaigns_diagnostic or mcp_ga_setup) and proof.get('diagnostic_session_safe'):
+                from modules.whatsapp.reconciliation import CAMPAIGN_LIST, campaigns_handoff_facts
+
+                browser.budget()
+                settings = json.dumps({'name': payload.campaign_name if campaigns_diagnostic else None,
+                                       'campaignsPath': campaigns_path})
+                render = await browser.page.evaluate(CAMPAIGN_LIST.replace('SETTINGS', settings))
+                await binding.require_current(browser, allow_document_transition=True)
+                if url == await browser.page.url():
+                    if campaigns_diagnostic:
+                        campaigns_diagnostic.render(url, render)
+                    if mcp_ga_setup:
+                        facts = campaigns_handoff_facts(url, campaigns_path, render)
+                        proof['campaigns_facts'] = facts
+                        proof['campaigns_link'] = render.get('campaigns_link')
+                        if facts != last_campaigns_facts:
+                            trace.agent_event('campaigns_handoff_observed', role='observer', **facts)
+                            last_campaigns_facts = facts
             return url, proof
 
         def changes(previous, current):
@@ -1809,12 +2225,34 @@ async def run_human_assisted(args):
                           if before.get(key) != after.get(key)]
             return properties + ['url_' + key for key in navigation_url_difference(old_url, new_url)]
 
-        while monotonic() < deadline:
+        while monotonic() < (campaigns_wait if mcp_ga_setup else deadline):
             before = await sample()
             await asyncio.sleep(min(config.login_stable_seconds, max(0, deadline - monotonic())))
             after = await sample()
             if changes(before, after) or not after[1]['diagnostic_session_safe']:
                 continue
+            if mcp_ga_setup:
+                url, proof = after
+                ready = proof.get('campaigns_facts', {})
+                if not ready.get('ready'):
+                    if monotonic() >= campaigns_wait:
+                        break
+                    selector = proof.get('campaigns_link')
+                    if (not campaigns_link_clicked and selector and selector == before[1].get('campaigns_link')
+                            and urlsplit(url).path.rstrip('/') == campaigns_admin):
+                        link = browser.page.locator(selector)
+                        if await link.count(timeout=2000) == 1 and await link.is_visible(timeout=2000) is True:
+                            fresh = await sample()
+                            if not changes(after, fresh) and fresh[1].get('campaigns_link') == selector:
+                                campaigns_link_clicked = True
+                                await reject_security_negatives(browser)
+                                trace.agent_event('campaigns_handoff_navigation', role='controller',
+                                                  control='CAMPAIGNS_LINK')
+                                await link.click(timeout=3000)
+                    continue
+                context['last_verified_step'] = 'CAMPAIGNS_READY'
+                trace.agent_event('campaigns_handoff_ready', role='observer', **ready)
+                print('CAMPAIGNS_READY ' + json.dumps(ready), flush=True)
             await reject_security_negatives(browser)
             # Show the checked origin and path locally. Query content may hold private session data.
             url, proof = after
@@ -1825,8 +2263,12 @@ async def run_human_assisted(args):
             seconds = int(max(0, deadline - monotonic()))
             quiet_terminal = True
             try:
-                confirm = console.confirm_page1_setup if page1 else console.confirm_tenant_route
-                decision = await confirm(display_url, seconds) if seconds > 0 else 'timeout'
+                if sms_launch:
+                    tenant = parsed.path.split('/')[1]
+                    decision = await console.confirm_sms_tenant(tenant, seconds) if seconds > 0 else 'timeout'
+                else:
+                    confirm = console.confirm_page1_setup if page1 and not one_approval_draft else console.confirm_tenant_route
+                    decision = await confirm(display_url, seconds) if seconds > 0 else 'timeout'
             finally:
                 quiet_terminal = False
             if decision != 'yes':
@@ -1836,11 +2278,16 @@ async def run_human_assisted(args):
                 return
             current = await sample()
             changed = changes(after, current)
+            if mcp_ga_setup and not current[1].get('campaigns_facts', {}).get('ready'):
+                changed.append('campaigns_readiness')
             if changed or not current[1]['diagnostic_session_safe']:
                 trace.agent_event('operator_tenant_context_changed', role='controller',
-                    code='OPERATOR_TENANT_RECONFIRMATION_REQUIRED', changed_properties=changed,
+                    code='OPERATOR_TENANT_CONTEXT_CHANGED' if sms_launch else 'OPERATOR_TENANT_RECONFIRMATION_REQUIRED',
+                    changed_properties=changed,
                     failed_predicates=current[1]['failed_predicates'],
                     before_context=proof['page_context'], after_context=current[1]['page_context'])
+                if sms_launch:
+                    raise V2Stop('OPERATOR_TENANT_CONTEXT_CHANGED', owner='browser', unsafe=True)
                 print('OPERATOR_TENANT_RECONFIRMATION_REQUIRED ' + json.dumps({
                     'changed_properties': changed, 'failed_predicates': current[1]['failed_predicates']}), flush=True)
                 continue
@@ -1850,21 +2297,32 @@ async def run_human_assisted(args):
             if verified_url != url:
                 changed = ['url_' + key for key in navigation_url_difference(url, verified_url)]
                 trace.agent_event('operator_tenant_context_changed', role='controller',
-                                  code='OPERATOR_TENANT_RECONFIRMATION_REQUIRED', changed_properties=changed)
+                                  code='OPERATOR_TENANT_CONTEXT_CHANGED' if sms_launch else 'OPERATOR_TENANT_RECONFIRMATION_REQUIRED',
+                                  changed_properties=changed)
+                if sms_launch:
+                    raise V2Stop('OPERATOR_TENANT_CONTEXT_CHANGED', owner='browser', unsafe=True)
                 print('OPERATOR_TENANT_RECONFIRMATION_REQUIRED ' + json.dumps(changed), flush=True)
                 continue
             context.update(operator_tab=binding, source_context=source_identity(proof['page_context']),
                            source_url=url, session_safe=True, verification='OPERATOR_CONFIRMED',
                            last_verified_step='OPERATOR_CONFIRMED')
-            if page1:
+            if page1 and not one_approval_draft:
                 context['page1_setup_approval'] = (binding, payload, digest)
                 trace.agent_event('page1_setup_approval', role='operator', accepted=True,
                                   payload_sha256=digest, authentication_verified=False)
             trace.agent_event('login_verification', role='operator', verification='OPERATOR_CONFIRMED',
                               authentication_verified=False, session_safe=True, page_context=proof['page_context'])
-            print('LOGIN_VERIFICATION OPERATOR_CONFIRMED', flush=True)
+            print(f'Netcore tenant {tenant} confirmed.' if sms_launch else 'LOGIN_VERIFICATION OPERATOR_CONFIRMED', flush=True)
             return
-        context['operator_stop_status'] = 'OPERATOR_TENANT_CONFIRMATION_TIMEOUT'
+        if mcp_ga_setup:
+            result = {'code': 'CAMPAIGNS_NOT_READY', 'dom_evidence': last_campaigns_facts,
+                      'route': landing_route_parts(await browser.page.url()),
+                      'last_verified_step': context['last_verified_step']}
+            trace.agent_event('campaigns_handoff_failed', role='observer', **result)
+            print('CAMPAIGNS_NOT_READY ' + json.dumps(result), flush=True)
+            context['operator_stop_status'] = 'CAMPAIGNS_NOT_READY'
+        else:
+            context['operator_stop_status'] = 'OPERATOR_TENANT_CONFIRMATION_TIMEOUT'
 
     async def review_and_ask_operator(active_browser,active_tools,login_result):
         nonlocal quiet_terminal
@@ -1874,19 +2332,54 @@ async def run_human_assisted(args):
         trace.agent_event('browser_window_observation',role='controller',**owned_window_observation(browser))
         if browser.page is None or browser.guard is None or browser.guard.failed or browser.guard.blocking_hosts:
             context['session_safe']=False
+            if unattended:
+                raise V2Stop('CURRENT_PROTECTED_LOGIN_DOCUMENT_UNAVAILABLE', owner='authentication', unsafe=True)
             if manual_requested:
                 print('LOGIN_CHECK_FAILED CURRENT_PROTECTED_LOGIN_DOCUMENT_UNAVAILABLE', flush=True)
             return
         browser.login_page=browser.page
-        console=OperatorConsole(event_sink=record_operator_decision)
         context['login_result']=login_result
+        if unattended:
+            from browser.protected_tabs import bind_confirmed_primary_tab
+            from modules.whatsapp.browser_baseline import reject_security_negatives
+
+            if browser.login_submissions != 1 or active_tools.terminal_error:
+                raise V2Stop('LOGIN_DOER_SINGLE_SUBMISSION_NOT_ESTABLISHED', owner='authentication', unsafe=True)
+            if not operator_tenant_route_allowed(await browser.page.url()):
+                raise V2Stop('UNATTENDED_TENANT_ROUTE_NOT_VERIFIED', owner='authentication', unsafe=True)
+            observation = await refresh_authentication()
+            if observation is None or verify(observation) != Result.AUTHENTICATED_AND_VERIFIED:
+                details = browser.verification_details or {}
+                print('UNATTENDED_LOGIN_FAILED ' + json.dumps({key: details.get(key) for key in
+                      ('reason', 'missing', 'gate_status', 'issues')}), flush=True)
+                raise V2Stop('UNATTENDED_AUTHENTICATION_NOT_VERIFIED', owner='authentication', unsafe=True)
+            await reject_security_negatives(browser)
+            binding = bind_confirmed_primary_tab(browser, route_allowed=operator_tenant_route_allowed)
+            await binding.require_current(browser)
+            current = await login_page_context(browser)
+            if (source_identity(current) != context['source_context']
+                    or await browser.page.url() != context['source_url']):
+                raise V2Stop('UNATTENDED_LOGIN_BINDING_CHANGED', owner='authentication', unsafe=True)
+            context.update(operator_tab=binding, doer_requested=True, last_verified_step='LOGIN_INDEPENDENTLY_VERIFIED')
+            trace.agent_event('unattended_tenant_verified', role='observer', authentication_verified=True)
+            return
+        console=OperatorConsole(event_sink=record_operator_decision)
         if operator_confirmed_mode:
-            if page1:
+            if login_doer_required:
                 if browser.login_submissions != 1 or active_tools.terminal_error:
                     raise V2Stop('LOGIN_DOER_SINGLE_SUBMISSION_NOT_ESTABLISHED', owner='authentication', unsafe=True)
                 if login_result.get('verification') in {str(Result.AUTH_FAILED), str(Result.SESSION_EXPIRED),
                                                         str(Result.HUMAN_ACTION_REQUIRED)}:
                     raise V2Stop('LOGIN_DOER_SECURITY_STOP', owner='authentication', unsafe=True)
+            if dashboard_handoff_only:
+                if after_dashboard_handoff is not None and login_result.get('error'):
+                    raise login_execution_stop(login_result)
+                if not (login_result.get('skill_loaded') is True and login_result.get('skill_digest')):
+                    raise V2Stop('DASHBOARD_LOGIN_SKILL_READ_NOT_VERIFIED', owner='controller', unsafe=True)
+                trace.agent_event('dashboard_login_skill_read', role='doer',
+                                  digest=login_result['skill_digest'], skill_loaded=True,
+                                  independent_verification=login_result.get('verification'),
+                                  reason_code=login_result.get('reason_code'))
             await confirm_operator_tenant()
             return
         if manual_requested:
@@ -2067,7 +2560,7 @@ async def run_human_assisted(args):
 
     async def login_node(_state):
         trace.agent_stage='login'
-        trace.agent_phase='operator_login' if operator_login and not page1 else 'login_doer'
+        trace.agent_phase='operator_login' if operator_login and not login_doer_required else 'login_doer'
         login_start=len(trace.model_diagnostics)
         async def supervised_review(*values):
             try:return await review_and_ask_operator(*values)
@@ -2081,19 +2574,21 @@ async def run_human_assisted(args):
                 trace.agent_event('supervised_handoff_failed',role='controller',code=code,error_class=type(error).__name__)
                 raise
         try:
-            if operator_login and not page1:
+            if operator_login and not login_doer_required:
                 result = await run_operator_login(supervised_review)
             else:
                 trace.agent_event('login_doer_started',role='doer',credential_submission_limit=1)
                 login_model = openai_model('doer', settings, trace, budget, login=True)
                 login_task = DEFAULT_TASK
-                if page1:
+                if login_doer_required:
                     login_task += (' Once the single sign-in submission reaches the Netcore application, '
                                    'finish the Login Doer and report independent evidence accurately. '
-                                   'The controller will ask the operator to confirm the dashboard tenant.')
+                                   + ('The controller will verify the authenticated tenant.' if unattended else
+                                      'The controller will ask the operator to confirm the dashboard tenant.'))
                 result=await _execute_doer(browser,login_tools,login_task,login_model,budget,False,
                     SkillStore().snapshot(),close_session=False,login_timeout=session_seconds,
-                    after_login=supervised_review)
+                    after_login=supervised_review,
+                    after_browser_start=campaigns_diagnostic.start if campaigns_diagnostic else before_dashboard_handoff)
         finally:
             context['login_usage']=request_usage(trace,login_start,role='doer')
         context['login_result']=result
@@ -2133,8 +2628,68 @@ async def run_human_assisted(args):
     async def run_whatsapp_doer(state,route):
         nonlocal skill, quiet_terminal
         context['failure_stage']='whatsapp_handoff'
+        if dashboard_handoff_only:
+            from browser.inspection import inspection_hold
+            binding = context.get('operator_tab')
+            if route != 'OPERATOR_CONFIRMED' or binding is None:
+                raise V2Stop('DASHBOARD_TENANT_CONFIRMATION_REQUIRED', owner='authorization')
+            await binding.require_current(browser)
+            if after_dashboard_handoff is not None:
+                context['failure_stage'] = 'dashboard_handoff_callback'
+                usage_start = len(trace.model_diagnostics)
+                evidence = await after_dashboard_handoff(browser, binding, artifact_dir, settings=settings, budget=budget,
+                                                         task_request_limit=caps['task'])
+                if evidence.get('task_doer_invoked'):
+                    context['task_doer_invoked'] = True
+                    context['task_usage'] = request_usage(trace, usage_start, role='doer')
+                if evidence.get('teacher_review'):
+                    context['teacher_review'] = evidence['teacher_review']
+                    context['candidate_result'] = evidence['teacher_review'].get('candidate')
+                context['dashboard_handoff_evidence'] = evidence
+                context['last_verified_step'] = evidence['last_verified_step']
+                return {'status': evidence['status'], 'route': route, 'authentication_verified': False,
+                        'task_doer_invoked': bool(evidence.get('task_doer_invoked')), 'persistence_allowed': False}
+            seconds = min(300, int(human_assisted_remaining_seconds(session_seconds, context['started'])))
+            if seconds <= 0:
+                raise V2Stop('DASHBOARD_HOLD_EXPIRED', owner='controller')
+            trace.agent_event('dashboard_handoff_hold', role='controller', status='OPEN', seconds=seconds)
+            status = 'DASHBOARD_HOLD_CLOSED'
+            try:
+                await inspection_hold(seconds, prompt='Confirmed dashboard is held for read-only review. '
+                                      'Keep this terminal open. Enter ends the hold and closes Chromium.')
+            except TimeoutError:
+                status = 'DASHBOARD_HOLD_EXPIRED'
+            trace.agent_event('dashboard_handoff_hold', role='controller', status=status)
+            return {'status': status, 'route': route, 'authentication_verified': False,
+                    'task_doer_invoked': False, 'persistence_allowed': False}
+        if reconcile_requested:
+            if route != ('VERIFIED' if unattended else 'OPERATOR_CONFIRMED') or context.get('operator_tab') is None:
+                raise V2Stop('RECONCILIATION_TENANT_CONFIRMATION_REQUIRED',owner='authorization')
+            from modules.whatsapp.reconciliation import reconcile_campaign
+            context['failure_stage']='campaign_reconciliation'
+            async def confirm_ready_list():
+                nonlocal quiet_terminal
+                seconds = min(review_seconds, int(human_assisted_remaining_seconds(session_seconds, context['started'])))
+                if seconds <= 0:
+                    return 'timeout'
+                console = OperatorConsole(event_sink=record_operator_decision)
+                quiet_terminal = True
+                try:
+                    return await console.confirm_campaign_list_visible(seconds)
+                finally:
+                    quiet_terminal = False
+            evidence = await reconcile_campaign(browser, context['operator_tab'], payload,
+                                                reconcile_run or trace.run_id, reconciled_at if reconcile_run else None,
+                                                confirm=None if unattended else confirm_ready_list,
+                                                campaign_id=unattended.campaign_id if unattended else None,
+                                                diagnostic=campaigns_diagnostic, reload_once=campaigns_reload_once)
+            context['reconciliation'] = evidence
+            if evidence['status'] == 'PERSISTED_SCHEDULE_MATCH':
+                context['last_verified_step'] = 'DRAFT_RECORD_VERIFIED'
+            return {'status':evidence['status'],'route':route,'authentication_verified':route == 'VERIFIED',
+                    'task_doer_invoked':False,'persistence_allowed':False}
         verified=route=='VERIFIED'
-        operator_tab = context.get('operator_tab') if route == 'OPERATOR_CONFIRMED' else None
+        operator_tab = context.get('operator_tab') if route == 'OPERATOR_CONFIRMED' or unattended else None
         if route == 'OPERATOR_CONFIRMED' and (not operator_confirmed_mode or operator_tab is None):
             raise V2Stop('OPERATOR_CONFIRMED_TAB_UNAVAILABLE', owner='authorization', unsafe=True)
         if manual_requested and not (verified or operator_tab is not None):
@@ -2146,6 +2701,51 @@ async def run_human_assisted(args):
             raise V2Stop('HUMAN_DIAGNOSTIC_CONSENT_REQUIRED',owner='authorization',unsafe=True)
         if not context['session_safe']:
             raise V2Stop('OPERATOR_OBSERVED_NAVIGATION_REQUIRED',owner='authorization',unsafe=True)
+        if preview_draft_validation:
+            from modules.whatsapp.browser_baseline import reject_security_negatives
+            from modules.whatsapp.reconciliation import reconcile_campaign, resolve_draft_name_check
+            context['failure_stage'] = 'draft_campaign_name_check'
+            evidence = await reconcile_campaign(browser, operator_tab, payload, trace.run_id, None,
+                                                check_unused=True, require_configuration=unattended_write)
+            context['draft_name_check'] = evidence
+            if unattended_write and evidence['status'] == 'PERSISTED_DRAFT_MATCH':
+                context['schedule_draft_preview'] = {**evidence, 'existing_record': True}
+                context['last_verified_step'] = 'DRAFT_RECORD_VERIFIED'
+                return {'status': 'DRAFT_RECORD_VERIFIED', 'route': route, 'authentication_verified': verified,
+                        'task_doer_invoked': False, 'persistence_allowed': False}
+            if prior_claim:
+                raise V2Stop('PRIOR_DRAFT_SAVE_ATTEMPT_REQUIRES_READ_ONLY_RECONCILIATION',
+                             owner='uncertain_write', unsafe=True)
+            if unattended_write and evidence['status'] == 'CAMPAIGN_NAME_UNUSED':
+                payload.check_schedule()
+
+            async def confirm_unused():
+                nonlocal quiet_terminal
+                context['draft_name_operator_prompted'] = True
+                await operator_tab.require_current(browser)
+                seconds = min(review_seconds, int(human_assisted_remaining_seconds(session_seconds, context['started'])))
+                console = OperatorConsole(event_sink=record_operator_decision)
+                quiet_terminal = True
+                try:
+                    return await console.confirm_unused_campaign_name(payload.campaign_name, seconds) if seconds > 0 else 'timeout'
+                finally:
+                    quiet_terminal = False
+
+            name_status = evidence['status'] if unattended else await resolve_draft_name_check(evidence['status'], confirm_unused)
+            if context.get('draft_name_operator_prompted'):
+                trace.agent_event('draft_name_operator_result', role='operator', status=name_status,
+                                  automated_status=evidence['status'], payload_sha256=digest)
+            if name_status not in {'CAMPAIGN_NAME_UNUSED', 'CAMPAIGN_NAME_OPERATOR_CONFIRMED_UNUSED'}:
+                return {'status': name_status, 'route': route, 'authentication_verified': verified,
+                        'task_doer_invoked': False, 'persistence_allowed': False}
+            await operator_tab.require_current(browser)
+            await reject_security_negatives(browser)
+            current = await login_page_context(browser)
+            current_url = await browser.page.url()
+            if not current.get('primary_document_coherent') or not operator_tenant_route_allowed(current_url):
+                raise V2Stop('DRAFT_NAME_CHECK_DOCUMENT_CHANGED', owner='browser', unsafe=True)
+            context.update(source_context=source_identity(current), source_url=current_url,
+                           last_verified_step=name_status)
         if context['source_url'] is None:
             raise V2Stop('OBSERVED_SOURCE_URL_UNAVAILABLE',owner='browser',unsafe=True)
         source_url=context['source_url']
@@ -2203,7 +2803,7 @@ async def run_human_assisted(args):
                             navigation_kind=kind, before=before_route, after=current_route, route_match=expected)
                     signin = current_route['hostname'] == urlsplit(config.login_url).hostname
                     pending = context.get('setup_landing_pending_since')
-                    settling = (page1 and not context.get('setup_landing_certified')
+                    settling = ((page1 or mcp_discovery) and not context.get('setup_landing_certified')
                         and kind == 'SAME_DOCUMENT_NAVIGATION' and same_tenant_landing_path(url, SETUP_URL)
                         and (pending is not None or before_route in (landing_route_parts(SETUP_URL),
                                                                      landing_route_parts(SETUP_URL + '#setup'))))
@@ -2230,14 +2830,10 @@ async def run_human_assisted(args):
             browser.guard.navigation_observer = watch_setup_navigation
         await browser.navigate(SETUP_URL)
         authorization=human_assisted_authorization(args, verified=verified)
-        if selected_candidate and authorization.manual_form_test:
-            skill = selected_candidate
-        elif selected_candidate:
-            trace.agent_event('candidate_selection_not_loaded', role='controller',
-                              reason='VERIFIED_MANUAL_SETUP_REQUIRED', version=candidate_version)
         context['skill']=skill
         tools=V2BrowserTools(browser,payload,setup_ui,authorization,artifact_dir)
         tools.human_assisted_setup = True
+        tools.ga_setup_fields = ga_fields
         tools.page1_tag_chip_mode = page1
         if operator_tab is not None:
             tools.operator_login_binding = operator_tab
@@ -2253,24 +2849,260 @@ async def run_human_assisted(args):
             {v for v in payload.model_dump().values() if isinstance(v,str) and len(v)>=4} |
             {v for field in ('include_audience','exclude_audience') for v in payload.audience_values(field)
              if len(v)>=4},key=len,reverse=True))
-        context.update(tools=tools,payload=payload,authorization=authorization,task_digest=digest)
-        (artifact_dir/'loaded-task-skill.md').write_bytes(skill.content.encode('utf-8'))
-        trace.agent_event('loaded_task_skill',role='controller',content_sha256=skill.digest,
-            approved=skill.approved,source_version=skill.metadata.get('version') or skill.metadata.get('source_version'))
-        print('SETUP_STRATEGY ' + json.dumps({
-            'version': skill.metadata.get('version') or skill.metadata.get('source_version'),
-            'sha256': skill.digest, 'path': str(artifact_dir / 'loaded-task-skill.md'),
-        }), flush=True)
+        context.update(tools=tools,payload=payload,authorization=authorization,task_digest=strategy_task_digest)
         tools.read_only = manual_requested or not authorization.manual_form_test
         tools.manual_authentication_verified = verified
         context['failure_stage']='setup_pre_observation_protection'
-        if not page1:
+        if not page1 and not mcp_discovery:
             await tools.protect()
+        if mcp_discovery:
+            from modules.whatsapp.page1_transition import verify_active_campaign_stage
+
+            tools.mcp_discovery = True
+            tools.mcp_campaign_name_write = mcp_name_write
+            trace.agent_stage = 'setup'
+            context['failure_stage'] = 'mcp_setup_readiness'
+            deadline = monotonic() + min(operation_seconds + 20, human_assisted_remaining_seconds(session_seconds, context['started']))
+            try:
+                while monotonic() < deadline:
+                    try:
+                        surface = await verify_active_campaign_stage(tools, 'setup')
+                        context['setup_landing_certified'] = True
+                        break
+                    except V2Stop as error:
+                        if error.code != 'CAMPAIGN_ACTIVE_STAGE_NOT_VERIFIED':
+                            raise
+                    await asyncio.sleep(.5)
+                else:
+                    raise V2Stop('MCP_SETUP_ROUTE_OR_CONTROL_NOT_READY', owner='recognition')
+            except V2Stop as error:
+                observed_route = landing_route_parts(await browser.page.url())
+                trace.agent_event('mcp_setup_readiness_failed', role='observer', observed_route=observed_route,
+                                  last_verified_step=context['last_verified_step'], code=error.code)
+                print('MCP_SETUP_READINESS_FAILED ' + json.dumps({'observed_route':observed_route,
+                      'last_verified_step': context['last_verified_step'], 'code':error.code}), flush=True)
+                raise
+            context['last_verified_step'] = 'MCP_SETUP_SURFACE_VERIFIED'
+            trace.agent_event('mcp_setup_surface_verified', role='observer', observed_route=landing_route_parts(await browser.page.url()),
+                              control=surface.get('control'))
+            trace.agent_phase = 'task_doer'
+            context['failure_stage'] = 'mcp_doer_observation'
+            async with open_step(tools, StepTools('doer', 'setup', frozenset({'observe'}))) as client:
+                observation = await client.read('browser_observe')
+            context['last_verified_step'] = 'MCP_DOER_OBSERVATION_RETURNED'
+            if mcp_ga_setup:
+                from modules.whatsapp.ga_teacher_evidence import GATeacherEvidence, scoped_ga_switch_observed
+                from modules.whatsapp.mcp_steps import GA_TEACHER_STEP, ga_strategy_sha256, mcp_ga_switch, write_strategy
+
+                trace.agent_event('mcp_ga_strategy_selected', role='controller',
+                                  source='TEACHER_CANDIDATE' if mcp_ga_candidate else 'CORRECTED_CONTROLLER_BASELINE',
+                                  skill_sha256=(selected_candidate or skill).digest,
+                                  strategy_sha256=(mcp_ga_candidate['strategy_sha256'] if mcp_ga_candidate
+                                                   else ga_strategy_sha256()))
+                if observation.get('stage_visible') is not True:
+                    raise V2Stop('MCP_GA_SETUP_NOT_VISIBLE', owner='recognition')
+                document = await tools.check_write_scope(require_setup_route=True, preflight=True)
+                context['failure_stage'] = 'mcp_ga_approval'
+                seconds = min(review_seconds, int(human_assisted_remaining_seconds(session_seconds, context['started'])))
+                quiet_terminal = True
+                try:
+                    print('MCP_GA_APPROVAL_SCOPE ' + json.dumps({'tenant': setup_ui.tenant,
+                        'payload_path': str(payload_path), 'payload_sha256': digest,
+                        'ga_tracking': payload.ga_tracking}), flush=True)
+                    console = OperatorConsole(event_sink=record_operator_decision)
+                    decision = await console.confirm_mcp_ga_write(payload.ga_tracking, seconds) if seconds > 0 else 'timeout'
+                finally:
+                    quiet_terminal = False
+                if decision != 'yes':
+                    context['operator_aborted'] = True
+                    raise V2Stop('MCP_GA_APPROVAL_DECLINED' if decision == 'no' else 'MCP_GA_APPROVAL_TIMEOUT',
+                                 owner='authorization')
+                load_v2_payload(payload_path, approved_digest=digest)
+                if await tools.protect() != document:
+                    raise V2Stop('OPERATOR_APPROVED_SETUP_DOCUMENT_CHANGED', owner='browser', unsafe=True)
+                tools.operator_approved_setup_document = document
+                tools.operator_approved_payload = payload
+                tools.authorization = human_assisted_authorization(args, verified=verified, operator_confirmed=True)
+                held = GATeacherEvidence(tools, document)
+                context['failure_stage'] = 'mcp_ga_switch'
+
+                async def select_ga_action(client, reference):
+                    from langsmith import tracing_context
+
+                    active_skill = selected_candidate or skill
+                    budget.role_limits['doer'] = budget.role_requests['doer'] + caps['task']
+                    started = len(trace.model_diagnostics)
+                    start_event = len(tools.events)
+                    model = openai_model('doer', settings, trace, budget, max_output_tokens=task_output)
+                    agent = create_v2_doer(model, tools, trace, budget, active_skill,
+                        mcp_tools=client.agent_tools({'browser_type'}, image_content=False),
+                        mcp_strategy=mcp_ga_strategy)
+                    context['task_doer_invoked'] = True
+                    trace.agent_event('mcp_ga_model_doer_started', role='doer',
+                        skill_sha256=active_skill.digest, offered_tools=['browser_type'])
+                    task = {'field': 'ga_tracking', 'reference': reference, 'current_checked': True,
+                            'approved_checked': payload.ga_tracking, 'permitted_tool': 'browser_type'}
+                    try:
+                        with tracing_context(enabled=False):
+                            await agent.ainvoke({'messages':[{'role':'user','content':json.dumps(task)}]},
+                                {'configurable':{'thread_id':trace.run_id+'-mcp-ga-doer'},'recursion_limit':12})
+                    finally:
+                        context['task_usage'] = request_usage(trace, started, role='doer')
+                    events = tools.events[start_event:]
+                    if len(events) != 1 or events[0].get('action') != 'type' or events[0].get('field') != 'ga_tracking':
+                        raise V2Stop('MCP_GA_MODEL_ACTION_NOT_ESTABLISHED', owner='model')
+                    action = events[0]
+                    trace.agent_event('mcp_ga_action_selected', role='doer', selection='MODEL',
+                                      tool='browser_type', field='ga_tracking', evidence_ref=action.get('trace_ref'))
+                    return {**action['result'], 'ok': action['ok']}
+
+                tools.read_only = False
+                try:
+                    verdict = await mcp_ga_switch(tools, held, retry_procedures=(
+                        selected_candidate.metadata.get('procedures', ()) if mcp_ga_candidate else ()),
+                        select_action=select_ga_action)
+                finally:
+                    tools.read_only = True
+                context['mcp_ga_result'] = verdict
+                print('MCP_GA_RESULT ' + json.dumps(verdict), flush=True)
+                if verdict['status'] == 'MCP_GA_VERIFIED':
+                    context['last_verified_step'] = 'MCP_GA_VERIFIED'
+                    return {'status':'MCP_GA_VERIFIED','authentication_verified':verified,
+                            'task_doer_invoked':context['task_doer_invoked']}
+                stop = {'code':'STUCK','owner':'recognition','field':'ga_tracking','unsafe':False,
+                        'failed_approaches':{'ga_tracking':verdict['failed_approaches']}}
+                if tools.terminal or tools.pending_write:
+                    raise V2Stop('MCP_GA_HELD_STATE_UNSAFE', owner='browser', unsafe=True)
+                trace.agent_phase = 'teacher'
+                context.update(trace=trace, directory=artifact_dir, budget=budget, findings=[],
+                               human_assisted=True, authentication_verified=verified,
+                               login_verification=context.get('verification'), review_kind='recoverable_strategy',
+                               teacher=openai_model('teacher', settings, trace, budget))
+                state = {'status':'STUCK','stage':'setup','failure':stop}
+                async with open_step(tools, GA_TEACHER_STEP, held_ga=held) as client:
+                    context['mcp_teacher_trace'] = await client.read('redacted_trace', {'limit': 16})
+                    context['teacher_mcp_tools'] = client.agent_tools({'inspect_ga_setup','view_ga_setup'})
+                    await review_v2_attempt(context, state, tools.authorization, payload, live_evidence=held)
+                context.pop('teacher_mcp_tools', None)
+                lesson = context.get('lesson')
+                if (lesson and scoped_ga_switch_observed(held.dom or {}) and lesson.instructions
+                        and any(step.action == 'type' and step.when == 'ga_scoped_control_bound' for step in lesson.instructions)
+                        and any(step.action == 'verify' for step in lesson.instructions)
+                        and all(step.field in {None,'ga_tracking'} and step.goal == 'setup'
+                                and step.action in {'observe','dom','inspect','scroll','type','verify'}
+                                for step in lesson.instructions)):
+                    from learning.skill_storage.registry import whatsapp_history
+
+                    context['mcp_switch_candidate'] = True
+                    await store_v2_candidate(context, state, tools.authorization, payload, tools.ui, digest)
+                    saved = context.get('candidate_result')
+                    if saved:
+                        strategy = write_strategy(saved, selected_candidate or skill, lesson,
+                                                  whatsapp_history(), 'ga_tracking')
+                        context['mcp_ga_retry'] = {'candidate':saved['version'],
+                            'candidate_sha256':saved['content_sha256'],'strategy_sha256':strategy}
+                        trace.agent_event('mcp_ga_candidate', role='teacher', **context['mcp_ga_retry'])
+                return {'status':'STUCK','authentication_verified':verified,'task_doer_invoked':False,'failure':stop}
+            if mcp_name_write:
+                from hashlib import sha256
+                from modules.whatsapp.page1_fields import controls_for
+
+                controls = controls_for(tools, 'campaign_name')
+                if observation.get('stage_visible') is not True or len(controls) != 1:
+                    raise V2Stop('MCP_CAMPAIGN_NAME_CONTROL_NOT_BOUND', owner='recognition')
+                reference = controls[0]['reference']
+                document = await tools.check_write_scope(require_setup_route=True, preflight=True)
+
+                async def read_campaign_name(checkpoint):
+                    trace.agent_phase = 'observer'
+                    context['failure_stage'] = 'mcp_campaign_name_' + checkpoint
+                    async with open_step(tools, StepTools('observer', 'setup', frozenset({'readback'}))) as client:
+                        facts = await client.read('independent_readback')
+                    state = facts.get('observed_states', {}).get('campaign_name', {})
+                    same_session = (operator_tab.same_owning_session(browser.guard)
+                                    and await tools.protect() == document)
+                    trace.agent_event('mcp_campaign_name_readback', role='observer', field='campaign_name',
+                        checkpoint=checkpoint.upper(), observed_state=state, stage_visible=facts.get('stage_visible'),
+                        evidence_ref=facts.get('evidence_ref'), same_owned_browser_context=same_session)
+                    if not same_session or facts.get('stage_visible') is not True or not state:
+                        raise V2Stop('MCP_CAMPAIGN_NAME_READBACK_NOT_ESTABLISHED', owner='recognition')
+                    return state
+
+                before = await read_campaign_name('before')
+                if before.get('state') != 'EMPTY' or before.get('value_sha256') != sha256(b'').hexdigest():
+                    raise V2Stop('MCP_CAMPAIGN_NAME_NOT_EMPTY', owner='authorization')
+                context['last_verified_step'] = 'MCP_CAMPAIGN_NAME_EMPTY'
+                print('MCP_CAMPAIGN_NAME_BEFORE ""', flush=True)
+                context['failure_stage'] = 'mcp_campaign_name_approval'
+                seconds = min(review_seconds, int(human_assisted_remaining_seconds(session_seconds, context['started'])))
+                quiet_terminal = True
+                try:
+                    print('MCP_CAMPAIGN_NAME_APPROVAL_SCOPE ' + json.dumps({'tenant': setup_ui.tenant,
+                        'hostname': setup_parts.hostname, 'payload_path': str(payload_path),
+                        'payload_sha256': digest, 'campaign_name': payload.campaign_name}), flush=True)
+                    console = OperatorConsole(event_sink=record_operator_decision)
+                    decision = await console.confirm_mcp_campaign_name_write(seconds) if seconds > 0 else 'timeout'
+                finally:
+                    quiet_terminal = False
+                trace.agent_event('setup_write_consent', role='operator', accepted=decision == 'yes',
+                    field='campaign_name', payload_sha256=digest, authentication_verified=verified, status=decision)
+                if decision != 'yes':
+                    context['operator_aborted'] = True
+                    raise V2Stop('SETUP_WRITE_DECLINED' if decision == 'no' else 'SETUP_WRITE_APPROVAL_TIMEOUT',
+                                 owner='authorization')
+                load_v2_payload(payload_path, approved_digest=digest)
+                if await tools.protect() != document:
+                    raise V2Stop('OPERATOR_APPROVED_SETUP_DOCUMENT_CHANGED', owner='browser', unsafe=True)
+                tools.operator_approved_setup_document = document
+                tools.operator_approved_payload = payload
+                tools.authorization = human_assisted_authorization(args, verified=verified, operator_confirmed=True)
+                trace.agent_phase = 'task_doer'
+                context['failure_stage'] = 'mcp_campaign_name_write'
+                trace.agent_event('mcp_campaign_name_write_selected', role='controller', field='campaign_name',
+                                  action='type', selection_mode='CONTROLLER_SCRIPTED', payload_sha256=digest)
+                tools.read_only = False
+                try:
+                    async with open_step(tools, StepTools('doer', 'setup', frozenset({'type'}),
+                                                         campaign_name_reference=reference)) as client:
+                        result = await client.read('browser_type', {'field': 'campaign_name', 'reference': reference})
+                finally:
+                    tools.read_only = True
+                if result.get('ok') is not True:
+                    raise V2Stop(result.get('error') or 'MCP_CAMPAIGN_NAME_WRITE_FAILED',
+                                 owner=result.get('owner') or 'tool', unsafe=not result.get('retry_safe', False))
+                after = await read_campaign_name('after')
+                expected_hash = sha256(payload.campaign_name.encode('utf-8')).hexdigest()
+                if (after.get('state') != 'NONEMPTY' or after.get('payload_match') is not True
+                        or after.get('value_sha256') != expected_hash):
+                    raise V2Stop('MCP_CAMPAIGN_NAME_READBACK_MISMATCH', owner='recognition')
+                context['last_verified_step'] = 'MCP_CAMPAIGN_NAME_WRITE_VERIFIED'
+                print('MCP_CAMPAIGN_NAME_AFTER ' + json.dumps(payload.campaign_name), flush=True)
+                return {'status':'MCP_CAMPAIGN_NAME_WRITE_VERIFIED','route':route,'authentication_verified':verified,
+                        'task_doer_invoked':False,'persistence_allowed':False}
+            trace.agent_phase = 'observer'
+            context['failure_stage'] = 'mcp_observer_readback'
+            async with open_step(tools, StepTools('observer', 'setup', frozenset({'readback'}))) as client:
+                facts = await client.read('independent_readback')
+            same_owner = operator_tab.same_owning_session(browser.guard)
+            observed_states = facts.get('observed_states', {})
+            trace.agent_event('mcp_discovery_readback', role='observer', stage_visible=facts.get('stage_visible'),
+                              field_matches=facts.get('fields'), evidence_ref=facts.get('evidence_ref'),
+                              same_owned_browser_context=same_owner, observed_states=observed_states)
+            if (not same_owner or observation.get('stage_visible') is not True or facts.get('stage_visible') is not True
+                    or not observed_states):
+                raise V2Stop('MCP_DISCOVERY_SETUP_READBACK_NOT_ESTABLISHED', owner='recognition')
+            context['last_verified_step'] = 'MCP_READ_ONLY_DISCOVERY_VERIFIED'
+            return {'status':'MCP_READ_ONLY_DISCOVERY_VERIFIED','route':route,'authentication_verified':verified,
+                    'task_doer_invoked':False,'persistence_allowed':False}
         if manual_requested:
             context['failure_stage'] = 'setup_preapproval_visibility'
             quiet_terminal = True
             try:
-                visibility_window = asyncio.timeout(operation_seconds)
+                # The GA-only guarded route can finish loading just after the
+                # ordinary per-operation limit. Wait read-only without extending
+                # individual operations, edit authorization, or the session.
+                visibility_seconds = operation_seconds + 20 if ga_fields else operation_seconds
+                visibility_window = asyncio.timeout(visibility_seconds)
                 try:
                     async with visibility_window:
                         while True:
@@ -2282,8 +3114,8 @@ async def run_human_assisted(args):
                                              owner='browser', unsafe=True)
                             try:
                                 observed_document = await tools.protect()
-                                form = await tools.observe(strategy='dom' if page1 else None)
-                                if not page1:
+                                form = await tools.observe(strategy='dom' if page1 or ga_fields else None)
+                                if not (page1 or ga_fields):
                                     break
                                 if await tools.protect() != observed_document:
                                     raise V2Stop('SETUP_DOCUMENT_CHANGED_DURING_PREFLIGHT',
@@ -2322,7 +3154,18 @@ async def run_human_assisted(args):
                 context['failure_stage'] = 'setup_write_approval'
                 console = OperatorConsole(event_sink=record_operator_decision)
                 seconds = min(review_seconds, int(human_assisted_remaining_seconds(session_seconds, context['started'])))
-                if page1:
+                if one_approval_draft:
+                    if not operator_tab.same_owning_session(browser.guard) or await tools.protect() != setup_document:
+                        raise V2Stop('DRAFT_APPROVAL_TENANT_SESSION_CHANGED',owner='authorization',unsafe=True)
+                    payload.check_schedule()
+                    approved_values = {key:value for key,value in payload.model_dump().items()
+                        if key in {'campaign_name','waba','business_number','tag','audience_type','include_audience',
+                                   'exclude_audience','template','send_type','schedule_datetime','timezone','final_action'}}
+                    print('DRAFT_APPROVAL_SCOPE ' + json.dumps({'tenant':setup_ui.tenant,'hostname':setup_parts.hostname,
+                        'payload_path':str(payload_path),'payload_sha256':digest,'values':approved_values}),flush=True)
+                    decision = ('yes' if unattended else
+                                await console.confirm_draft_workflow(seconds) if seconds > 0 else 'timeout')
+                elif page1:
                     approval = context.get('page1_setup_approval')
                     if approval is None or approval[0] is not operator_tab or approval[1] is not payload or approval[2] != digest:
                         raise V2Stop('PAGE1_SETUP_APPROVAL_BINDING_CHANGED', owner='authorization', unsafe=True)
@@ -2345,9 +3188,36 @@ async def run_human_assisted(args):
             if operator_tab is not None:
                 tools.operator_approved_setup_document = setup_document
                 tools.operator_approved_payload = payload
+            if one_approval_draft:
+                from modules.whatsapp.schedule_draft import DraftApproval
+                tools.draft_approval = DraftApproval(tools,payload_path,digest,setup_document)
+                tools.draft_approval.require(tools,'setup')
+                trace.agent_event('draft_approval_bound',role='operator',payload_sha256=digest,
+                                  approved_transitions=DraftApproval.sequence,
+                                  approval_source='LAUNCH_CONFIGURATION' if unattended else 'TERMINAL')
             authorization = human_assisted_authorization(args, verified=verified, operator_confirmed=operator_tab is not None)
             tools.authorization = context['authorization'] = authorization
             tools.read_only = False
+        if selected_candidate:
+            # Operator-confirmed Setup acquires edit authorization only after
+            # the protected document check and the explicit write approval.
+            if authorization.manual_form_test and context.get('setup_write_approved'):
+                skill = selected_candidate
+            elif ga_fields:
+                raise V2Stop('GA_CANDIDATE_REQUIRES_APPROVED_SETUP_DOCUMENT', owner='authorization')
+            else:
+                trace.agent_event('candidate_selection_not_loaded', role='controller',
+                                  reason='VERIFIED_MANUAL_SETUP_REQUIRED', version=candidate_version)
+        context['skill'] = skill
+        tools.ga_adjacent_keys = bool(ga_fields and skill is selected_candidate and
+            skill.metadata.get('ga_binding_basis') == 'ADJACENT_EXACT_ANGULAR_KEYS')
+        (artifact_dir/'loaded-task-skill.md').write_bytes(skill.content.encode('utf-8'))
+        trace.agent_event('loaded_task_skill',role='controller',content_sha256=skill.digest,
+            approved=skill.approved,source_version=skill.metadata.get('version') or skill.metadata.get('source_version'))
+        print('SETUP_STRATEGY ' + json.dumps({
+            'version': skill.metadata.get('version') or skill.metadata.get('source_version'),
+            'sha256': skill.digest, 'path': str(artifact_dir / 'loaded-task-skill.md'),
+        }), flush=True)
         route_fragment = (tools._last_protected_route or {}).get('fragment_class', 'UNOBSERVED')
         print(f'SETUP_ROUTE {route_fragment} | SETUP_FORM_READINESS PENDING_DOER_OBSERVATION', flush=True)
         context['failure_stage']='setup_observation'
@@ -2371,7 +3241,18 @@ async def run_human_assisted(args):
         context['failure_stage']='provider_model_configuration'
         model=openai_model('doer',settings,trace,budget,max_output_tokens=task_output)
         context['failure_stage']='doer_construction_and_registration'
-        agent=create_v2_doer(model,tools,trace,budget,skill)
+        recovery_instruction = ('Recover only the current field using the approved payload. Use at most one distinct '
+                                'approach. Inspect the live state before another menu-open attempt. A verified type or '
+                                'select includes independent readback. Never retry an uncertain write. Return promptly '
+                                'when the field is verified or the control is ambiguous.')
+        instruction_capture = None
+        if unattended_write:
+            from modules.whatsapp.diagnostic_artifacts import capture_doer_instructions
+
+            def instruction_capture(system_text, skill_text):
+                return capture_doer_instructions(artifact_dir, trace, skill.digest, system_text,
+                                                 skill_text, recovery_instruction)
+        agent=create_v2_doer(model,tools,trace,budget,skill,instruction_capture=instruction_capture)
         from modules.whatsapp.contract import v2_action_arguments
         trace.agent_event('setup_tool_contract', role='controller', read_only=tools.read_only,
             actions={action: {'required': required, 'allowed': allowed} for action, (required, allowed)
@@ -2420,11 +3301,7 @@ async def run_human_assisted(args):
                                        'verified_fields': [key for key, ok in
                                            tools.last_independent_readback.get('fields', {}).items() if ok is True],
                                        'failed_approaches': sorted(tools.failed_approaches.get(('setup', field), ()))}
-                            message = ('Recover only the current field using the approved payload. Use at most one distinct '
-                                       'approach. Inspect the live state before another menu-open attempt. A verified type or '
-                                       'select includes independent readback. Never retry an uncertain write. Return promptly '
-                                       'when the field is verified or the control is ambiguous. Current evidence: '
-                                       + json.dumps(current, separators=(',', ':')))
+                            message = recovery_instruction + ' Current evidence: ' + json.dumps(current, separators=(',', ':'))
                             try:
                                 await agent.ainvoke({'messages': [{'role': 'user', 'content': message}]},
                                     {'configurable': {'thread_id': trace.run_id + '-page1-' + field},
@@ -2436,16 +3313,28 @@ async def run_human_assisted(args):
                                     raise
                                 trace.agent_event('page1_doer_recovery_bounded', role='controller',
                                                   field=field, code=str(error))
-                        verdict = await run_page1_fields(tools, recover_field)
+                        if draft_label == 'B':
+                            verdict = await run_page1_fields(tools, recover_field, verify_tag_first=True)
+                        else:
+                            verdict = await run_page1_fields(tools, recover_field)
                         context['evaluation'] = verdict
                         result = {'structured_response': V2Turn(status='VERIFY' if verdict['status'] == 'COMPLETE'
                                                                  else verdict['status'])}
                     elif authorization.manual_form_test:
+                        if ga_fields:
+                            await tools.reveal_ga_advanced()
+                            from modules.whatsapp.page1_fields import apply_known_field
+
+                            await apply_known_field(tools, 'campaign_name')
                         mark_doer_invoked()
                         verdict=await run_bounded_setup_doer(agent,tools,trace,
                             thread_id=trace.run_id+'-human-assisted-whatsapp',
                             goal=task_goal+edit_scope+(
-                                'Use the fresh preapproval control references. Write and verify Campaign Name first. '
+                                ('Operate only the currently required GA field after Campaign Name. GA controls must be '
+                                 'inside Advanced, Google Analytics tracking. Type applies the fixed payload. After enabling '
+                                 'use the refreshed references for UTM inputs. Empty content must be read as an empty actual value. '
+                                 'If missing, try observe and dom as distinct read-only approaches. Stop before Next Step.')
+                                if ga_fields else 'Use the fresh preapproval control references. Write and verify Campaign Name first. '
                                 'Then WABA, Business Number, Tag, and GA Tracking. After WABA, use the fresh Business Number reference. '
                                 'If Tag has exhausted both '
                                 'binding approaches, continue with independently bound GA Tracking. Stop before Next Step.'
@@ -2480,11 +3369,51 @@ async def run_human_assisted(args):
             'VERIFIED_AUTHENTICATION_MANUAL_FORM_TEST') if authorization.manual_form_test else (
             'HUMAN_SUPERVISED_WHATSAPP_DIAGNOSTIC' if not verified else 'VERIFIED_READ_ONLY_WHATSAPP_DOER')
         evaluated=context.get('evaluation',{})
+        if ga_fields:
+            readback = evaluated.get('readback', {}).get('ga_readback', {})
+            print('GA_SETUP_READBACK ' + json.dumps({'status': evaluated.get('status'), 'actual': readback,
+                  'verified_fields': evaluated.get('verified_fields', [])}), flush=True)
+            if evaluated.get('status') == 'COMPLETE':
+                context['last_verified_step'] = 'GA_SETUP_VERIFIED'
         if page1 and evaluated.get('status') == 'COMPLETE':
             from modules.whatsapp.page1_transition import advance_setup_to_audience
             from modules.whatsapp.contract import PAGE1_SETUP_FIELDS
             if set(evaluated.get('verified_fields', ())) != set(PAGE1_SETUP_FIELDS):
                 raise V2Stop('PAGE1_ALL_FIELDS_READBACK_REQUIRED', owner='recognition')
+            if draft_label == 'B':
+                from modules.whatsapp.observer import deterministic_readback
+
+                context['failure_stage'] = 'setup_ga_tracking_readback'
+                # Campaign Name anchors Setup discovery while Advanced is closed.
+                tools.ga_setup_fields = ('campaign_name', 'ga_tracking')
+                try:
+                    await tools.observe(strategy='dom')
+                    await tools.reveal_ga_advanced()
+                    tracking = await deterministic_readback(tools, fields=('ga_tracking',))
+                    actual = tracking.get('ga_readback', {}).get('ga_tracking')
+                    if type(actual) is not bool:
+                        trace.agent_event('ga_tracking_readback_unavailable', role='observer',
+                                          card=(tools.last_observation or {}).get('ga_card_evidence'))
+                        raise V2Stop('GA_TRACKING_CONTROL_STATE_UNREADABLE', owner='recognition')
+                    if actual is True and payload.ga_tracking is False:
+                        from modules.whatsapp.page1_fields import controls_for, field_action
+
+                        controls = controls_for(tools, 'ga_tracking')
+                        if len(controls) != 1:
+                            raise V2Stop('GA_TRACKING_UNIQUE_CONTROL_REQUIRED', owner='recognition')
+                        changed = await field_action(tools, 'ga_tracking', 'type', controls[0]['reference'])
+                        if not changed.get('ok'):
+                            raise V2Stop(changed.get('error') or 'GA_TRACKING_WRITE_NOT_VERIFIED',
+                                         owner='recognition', unsafe=bool(tools.pending_write))
+                        await tools.observe(strategy='dom')
+                        tracking = await deterministic_readback(tools, fields=('ga_tracking',))
+                        actual = tracking.get('ga_readback', {}).get('ga_tracking')
+                    if actual is not payload.ga_tracking:
+                        raise V2Stop('GA_TRACKING_READBACK_NOT_MATCHED', owner='recognition')
+                    trace.agent_event('page1_field_result', role='observer', field='ga_tracking', readback='MATCH')
+                finally:
+                    tools.ga_setup_fields = None
+                await tools.observe(strategy='dom')
             context['last_verified_step'] = 'ALL_SETUP_FIELDS_VERIFIED'
             context['failure_stage'] = 'page1_next_step_approval'
             print('PAGE1_SETUP_VERIFIED ' + json.dumps(evaluated['verified_fields']), flush=True)
@@ -2492,17 +3421,22 @@ async def run_human_assisted(args):
             console = OperatorConsole(event_sink=record_operator_decision)
             quiet_terminal = True
             try:
-                decision = await console.confirm_page1_next_step(seconds) if seconds > 0 else 'timeout'
+                decision = ('yes' if one_approval_draft else
+                            await console.confirm_page1_next_step(seconds) if seconds > 0 else 'timeout')
             finally:
                 quiet_terminal = False
             if decision == 'yes':
                 context['failure_stage'] = 'page1_next_step'
                 def mark_attempt():
+                    if one_approval_draft:
+                        tools.draft_approval.begin(tools,'setup','audience')
                     context['page1_transition_attempted'] = True
                     context['campaign_transition_source'] = 'setup'
                     context['campaign_transition_destination'] = 'audience'
                 context['audience_transition'] = await advance_setup_to_audience(tools, mark_attempt)
                 if context['audience_transition']['status'] == 'AUDIENCE_VISIBLE':
+                    if one_approval_draft:
+                        tools.draft_approval.complete('audience')
                     context['last_verified_step'] = 'AUDIENCE_VISIBLE'
                     outcome = 'PAGE1_AUDIENCE_VISIBLE'
                     if through_audience or through_schedule:
@@ -2527,7 +3461,8 @@ async def run_human_assisted(args):
                                 session_seconds, context['started'])))
                             quiet_terminal = True
                             try:
-                                decision = await console.confirm_campaign_next_step(step, destination, seconds) if seconds > 0 else 'timeout'
+                                decision = ('yes' if one_approval_draft else
+                                            await console.confirm_campaign_next_step(step, destination, seconds) if seconds > 0 else 'timeout')
                             finally:
                                 quiet_terminal = False
                             if decision != 'yes':
@@ -2536,6 +3471,8 @@ async def run_human_assisted(args):
                                 break
                             context['failure_stage'] = step + '_next_step'
                             def mark_campaign_attempt():
+                                if one_approval_draft:
+                                    tools.draft_approval.begin(tools,step,destination)
                                 context['campaign_transition_source'] = step
                                 context['campaign_transition_destination'] = destination
                             transition = await advance_campaign_step(tools, step, destination, mark_campaign_attempt)
@@ -2543,6 +3480,8 @@ async def run_human_assisted(args):
                             if transition['status'] != destination.upper() + '_VISIBLE':
                                 raise V2Stop(transition['status'], owner='recognition',
                                              unsafe=bool(transition.get('click_attempted')))
+                            if one_approval_draft:
+                                tools.draft_approval.complete(destination)
                             tools.stage = tools.campaign_verified_stage = destination
                             context['last_verified_step'] = destination.upper() + '_VISIBLE'
                             outcome = context['last_verified_step']
@@ -2558,16 +3497,31 @@ async def run_human_assisted(args):
                                 session_seconds, context['started'])))
                             quiet_terminal = True
                             try:
-                                decision = await console.confirm_save_draft_preview(seconds) if seconds > 0 else 'timeout'
+                                decision = ('yes' if one_approval_draft else
+                                            await console.confirm_save_draft_preview(seconds) if seconds > 0 else 'timeout')
                             finally:
                                 quiet_terminal = False
                             if decision == 'yes':
                                 context['failure_stage'] = 'schedule_save_and_preview'
                                 def mark_save_attempt():
+                                    if one_approval_draft:
+                                        tools.draft_approval.begin(tools,'schedule','preview')
+                                    if unattended:
+                                        claim_save(ROOT/'outputs', unattended, payload, trace.run_id)
+                                    elif draft_label:
+                                        claim_save(ROOT/'outputs', rehearsal_claim, payload, trace.run_id)
                                     context['campaign_transition_source'] = 'schedule'
                                     context['campaign_transition_destination'] = 'preview'
-                                context['schedule_draft_preview'] = await schedule.save_and_preview(target, mark_save_attempt)
-                                context['last_verified_step'] = outcome = 'DRAFT_PREVIEW_VERIFIED'
+                                context['schedule_draft_preview'] = await schedule.save_and_preview(
+                                    target, mark_save_attempt, source_run=trace.run_id if one_approval_draft else None,
+                                    require_saved_configuration=unattended_write or bool(draft_label))
+                                if one_approval_draft:
+                                    tools.draft_approval.complete('preview')
+                                result = context['schedule_draft_preview']
+                                outcome = ('DRAFT_RECORD_VERIFIED' if result.get('schedule_source') == 'SAVED_RECORD'
+                                           else 'DRAFT_PREVIEW_VERIFIED')
+                                print(outcome + ' ' + json.dumps(result), flush=True)
+                                context['last_verified_step'] = outcome
                             else:
                                 context['operator_aborted'] = True
                                 outcome = 'SCHEDULE_DRAFT_SAVE_DECLINED' if decision == 'no' else 'SCHEDULE_DRAFT_APPROVAL_TIMEOUT'
@@ -2697,7 +3651,7 @@ async def run_human_assisted(args):
                     context['evaluation'] = setup_stopped_verdict(tools, failure)
                     trace.agent_event('setup_attempt_verdict', role='observer', **context['evaluation'])
                 screenshot = None
-                if (getattr(args, 'capture_audience_failure', False) and through_audience
+                if (not one_approval_draft and getattr(args, 'capture_audience_failure', False) and through_audience
                         and failure and not failure.get('unsafe') and tools.stage == 'audience'):
                     from browser.diagnostics import ScreenshotDiagnostics
                     result_pixels = await ScreenshotDiagnostics(browser).compare({}, {}, enabled=True, campaign_tools=tools)
@@ -2706,10 +3660,49 @@ async def run_human_assisted(args):
                     trace.agent_event('campaign_failure_screenshot', role='observer', **screenshot)
                 context['pre_cleanup_evidence'] = save_setup_evidence(artifact_dir, trace,
                     tools, context.get('evaluation'), failure, screenshot=screenshot)
+                if live_ga_teacher and failure.get('code') == 'STUCK' and not failure.get('unsafe'):
+                    from modules.whatsapp.ga_teacher_evidence import GATeacherEvidence
+
+                    review_state = {'status':'STUCK','stage':'setup','failure':failure}
+                    context.update(trace=trace, directory=artifact_dir, budget=budget,
+                        findings=[context['evaluation']], login_verification=context.get('verification'),
+                        human_assisted=True, review_kind='recoverable_strategy',
+                        authentication_verified=context.get('route')=='VERIFIED', task_skill_read=True,
+                        live_teacher_review_state=review_state)
+                    evidence = GATeacherEvidence(tools, await tools.protect())
+                    trace.agent_stage='setup';trace.agent_phase='teacher'
+                    trace.agent_event('ga_teacher_handoff', role='controller', status='SETUP_HELD_READ_ONLY',
+                        failure=failure, verified_fields=context['evaluation']['verified_fields'])
+                    context['teacher'] = openai_model('teacher',settings,trace,budget)
+                    async with asyncio.timeout(110):
+                        await review_v2_attempt(context, review_state, context['authorization'], payload,
+                                                live_evidence=evidence)
         except Exception as error:
             trace.agent_event('setup_evidence_unavailable', role='observer', error=type(error).__name__)
         finally:
-            if (operator_confirmed_mode and (context.get('evaluation') or {}).get('written_fields')
+            if campaigns_diagnostic:
+                campaigns_diagnostic.mark('DIAGNOSTIC_OBSERVATION_ENDED', status=final_state.get('status'))
+                campaigns_diagnostic.save(artifact_dir/'campaigns-readonly-diagnostic.json')
+            if ((context.get('last_verified_step') == 'DRAFT_RECORD_VERIFIED'
+                    or (preview_draft_validation and not context.get('draft_name_operator_prompted')
+                        and context.get('draft_name_check', {}).get('status')
+                        not in (None, 'CAMPAIGN_NAME_UNUSED'))
+                    or (one_approval_draft and (final_state.get('failure') or {}).get('owner') == 'uncertain_write'
+                        and browser.page is getattr(context.get('operator_tab'), 'page', None))
+                    or (reconcile_run and context.get('reconciliation')
+                    and context['reconciliation']['status'] not in
+                    {'CAMPAIGN_LIST_OPERATOR_READY_TIMEOUT', 'CAMPAIGN_LIST_NOT_CONFIRMED_VISIBLE'}))
+                    and not browser.close_started and not unattended):
+                from browser.inspection import inspection_hold
+                try:
+                    await context['operator_tab'].require_current(browser)
+                    trace.agent_event('campaign_reconciliation_review_hold', role='operator', status='OPEN')
+                    await inspection_hold(300, prompt='Chromium is open for read-only inspection. '
+                                          'Press Enter here when finished, or wait five minutes.')
+                except (TimeoutError, PermissionError, RuntimeError, V2Stop):
+                    pass
+            if (operator_confirmed_mode and context.get('last_verified_step') != 'DRAFT_RECORD_VERIFIED'
+                    and (context.get('evaluation') or {}).get('written_fields')
                     and not (final_state.get('failure') or {}).get('unsafe') and not browser.close_started):
                 from browser.inspection import inspection_hold
                 try:
@@ -2732,7 +3725,16 @@ async def run_human_assisted(args):
                     trace.cleanup_result='CLEANUP_UNCONFIRMED'
                     trace.agent_event('browser_cleanup',role='controller',
                         status='CLEANUP_UNCONFIRMED',error=type(error).__name__)
-        if (getattr(args,'authorized_learning',False) and
+        if context.get('live_teacher_review_state'):
+            from modules.whatsapp.diagnostic_artifacts import show_setup_candidate
+
+            if trace.cleanup_result == 'CLOSED_AND_PROFILE_REMOVED':
+                await store_v2_candidate(context, context['live_teacher_review_state'], context['authorization'],
+                                         payload, context['tools'].ui, context['task_digest'])
+            else:
+                context['candidate_error'] = 'DEFERRED_CLEANUP_UNCONFIRMED'
+            context['candidate_review'] = show_setup_candidate(artifact_dir, trace, context)
+        elif (not mcp_ga_setup and getattr(args,'authorized_learning',False) and
                 (context['task_doer_invoked'] or (page1 and context.get('evaluation'))) and not context.get('operator_aborted')):
             evaluation = context.get('evaluation', {})
             failed = final_state.get('failure') or evaluation.get('failure') or {}
@@ -2784,19 +3786,22 @@ async def run_human_assisted(args):
         'login_verification':context.get('verification','NOT_OBSERVED'),
         'login_gate_status':context.get('gate_status',{}),
         'evidence_configuration':evidence_status,
-        'login_mode':'operator_confirmed' if operator_confirmed_mode else 'operator' if operator_login else 'doer',
+        'login_mode': 'unattended' if unattended else 'operator_confirmed' if operator_confirmed_mode else 'operator' if operator_login else 'doer',
+        'unattended_action': unattended.action if unattended else None,
         'last_verified_step': (context['last_verified_step'] if context.get('last_verified_step') in
                                {'ALL_SETUP_FIELDS_VERIFIED','AUDIENCE_VISIBLE','AUDIENCE_FIELDS_VERIFIED',
                                 'CONTENT_VISIBLE','CONTENT_TEMPLATE_VERIFIED','CONTENT_FIELDS_VERIFIED','SCHEDULE_VISIBLE',
-                                'SCHEDULE_FIELDS_VERIFIED','DRAFT_PREVIEW_VERIFIED'} else
+                                'SCHEDULE_FIELDS_VERIFIED','DRAFT_PREVIEW_VERIFIED','DRAFT_RECORD_VERIFIED','GA_SETUP_VERIFIED'} else
                                'SETUP_FIELD_READBACK' if (context.get('evaluation') or {}).get('verified_fields')
                                else context.get('last_verified_step', 'NOT_ESTABLISHED')),
         'login_doer_outcome': ({key: (context.get('login_result') or {}).get(key)
-                               for key in ('verification', 'reason_code', 'error')}
-                              if page1 else None),
+                               for key in ('verification', 'reason_code', 'error', 'skill_digest', 'skill_loaded')}
+                              if page1 or dashboard_handoff_only or mcp_discovery else None),
         'audience_transition': context.get('audience_transition', {'click_attempted': bool(context.get('page1_transition_attempted'))})
                                if page1 else None,
         'operator_confirmed': context.get('verification') == 'OPERATOR_CONFIRMED',
+        'reconciliation': context.get('reconciliation'),
+        'schedule_draft_preview': context.get('schedule_draft_preview'),
         'login_submissions':browser.login_submissions,
         'diagnostic_consent':context['diagnostic_consent'],
         'diagnostic_session_safety':context.get('diagnostic_safety'),
@@ -2807,10 +3812,10 @@ async def run_human_assisted(args):
         'task_tool_event_count':len(context['tools'].events) if context['tools'] else 0,
         'login_doer_usage':context.get('login_usage'),
         'task_doer_usage':context.get('task_usage'),
-        'selected_skill_sha256':skill.digest,
-        'selected_skill_approved':skill.approved,
-        'selected_skill_status':skill.metadata.get('status'),
-        'selected_skill_version':skill.metadata.get('version') or skill.metadata.get('source_version'),
+        'selected_skill_sha256':skill.digest if skill else None,
+        'selected_skill_approved':skill.approved if skill else False,
+        'selected_skill_status':skill.metadata.get('status') if skill else None,
+        'selected_skill_version':(skill.metadata.get('version') or skill.metadata.get('source_version')) if skill else None,
         'teacher_status':trace.teacher_result,
         'teacher_dispatch_ready':sum(row['role'] == 'teacher' for row in trace.boundary_diagnostics),
         'teacher_response_returned':any(row['role'] == 'teacher' and
@@ -2826,6 +3831,9 @@ async def run_human_assisted(args):
         'evaluation':context.get('evaluation'),
         'written_fields':(context.get('evaluation') or {}).get('written_fields', []),
         'verified_fields':(context.get('evaluation') or {}).get('verified_fields', []),
+        'ga_readback': (context.get('mcp_ga_result') if mcp_ga_setup else
+                        ((context.get('evaluation') or {}).get('readback') or {}).get('ga_readback') if ga_fields else None),
+        'mcp_ga_retry': context.get('mcp_ga_retry'),
         'elapsed_seconds':round(monotonic()-context['started'],3),
         'browser_actions_used':trace.actions,
         'provider_requests':None,
@@ -2836,6 +3844,8 @@ async def run_human_assisted(args):
         'failure':final_state.get('failure'),
         'cleanup':trace.cleanup_result,
     }
+    if after_dashboard_handoff is not None:
+        result['dashboard_handoff_evidence'] = context.get('dashboard_handoff_evidence')
     page_observations={
         'status':'CAPTURED' if context.get('page_observations') is not None else 'NOT_CAPTURED',
         'latest_observation':context.get('page_observations'),

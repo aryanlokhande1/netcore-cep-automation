@@ -118,8 +118,9 @@ async def test_real_teacher_request_builder_measures_compact_reference_before_tr
     tree = ast.parse(Path("modules/whatsapp/workflow.py").read_text(encoding="utf-8"))
     build_review = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef)
                         and node.name == "review_v2_attempt")
-    prompt = next(keyword.value.value for node in ast.walk(build_review) if isinstance(node, ast.Call)
-                  for keyword in node.keywords if keyword.arg == "prompt_override")
+    prompt = next(node.value.value for node in ast.walk(build_review) if isinstance(node, ast.Assign)
+                  and any(isinstance(target, ast.Name) and target.id == "prompt" for target in node.targets)
+                  and isinstance(node.value, ast.Constant))
 
     async def capture(self, messages, *, stop=None, run_manager=None, **kwargs):
         self._get_request_payload(messages, stop=stop, **kwargs)

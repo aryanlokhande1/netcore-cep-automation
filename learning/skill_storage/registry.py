@@ -243,7 +243,7 @@ def whatsapp_history():
     return ROOT/'outputs'/'skill_history'/'whatsapp'
 
 
-def whatsapp_procedure_text(steps,ui):
+def whatsapp_procedure_text(steps,ui,*,ga_switch_only=False):
     from modules.whatsapp.contract import V2_CAPABILITIES,validate_v2_capability,V2Stop
     for step in steps:
         if step.action in V2_CAPABILITIES:
@@ -255,7 +255,12 @@ def whatsapp_procedure_text(steps,ui):
             part='search' if step.action=='search' else 'option' if step.action=='select' and kind=='combobox' else 'control'
             validate_v2_capability(step.action,kind,part)
     return '\n'.join('- When '+step.when.replace('_',' ')+' during '+step.goal+', use browser_action(action='+step.action+
-        (', field='+step.field if step.field else '')+'), using a fresh observed reference when required. Never retry uncertain writes or relax permissions.' for step in steps)
+        (', field='+step.field if step.field else '')+'), using a fresh observed reference when required.'+
+        (' Resolve the unique visible switch in Advanced > Google Analytics tracking and independently read its checked state.'
+         if ga_switch_only and step.when=='ga_scoped_control_bound' else
+         ' Resolve the exact ID and Angular field key in the adjacent UTM group under Advanced, with a visible native label, '
+         'then independently compare the actual input value. Test on a fresh unsaved Setup form.' if step.when=='ga_scoped_control_bound' else '')+
+        ' Never retry uncertain writes or relax permissions.' for step in steps)
 
 
 def whatsapp_skill(*,candidate=None,evaluate=False,task_digest=None,ui=None):
@@ -276,14 +281,22 @@ def whatsapp_skill(*,candidate=None,evaluate=False,task_digest=None,ui=None):
     if task_digest is not None and meta['task_sha256']!=task_digest:raise V2Stop('CANDIDATE_TASK_SCOPE_CHANGED',owner='authorization')
     from modules.whatsapp.contract import ProcedureStep
     steps=[ProcedureStep.model_validate(step) for step in meta['procedures']]
-    expected=base.content+'\n\n## Evidence-grounded candidate guidance\n\n'+whatsapp_procedure_text(steps,ui)+'\n'
+    ga_steps=any(step.when=='ga_scoped_control_bound' for step in steps)
+    ga_basis = meta.get('ga_binding_basis')
+    ga_switch_only = ga_basis == 'SCOPED_TRACKING_SWITCH'
+    if ga_switch_only and any(step.when=='ga_scoped_control_bound' and step.field!='ga_tracking' for step in steps):
+        raise V2Stop('CANDIDATE_GA_BINDING_PROVENANCE_INVALID',owner='authorization')
+    if ga_steps != (ga_basis in {'ADJACENT_EXACT_ANGULAR_KEYS','SCOPED_TRACKING_SWITCH'}) or (
+            ga_steps and meta.get('ga_binding_evidence_ref') not in meta.get('evidence_refs', ())):
+        raise V2Stop('CANDIDATE_GA_BINDING_PROVENANCE_INVALID',owner='authorization')
+    expected=base.content+'\n\n## Evidence-grounded candidate guidance\n\n'+whatsapp_procedure_text(steps,ui,ga_switch_only=ga_switch_only)+'\n'
     if content.decode('utf-8')!=expected:raise V2Stop('CANDIDATE_PROCEDURE_CONTENT_MISMATCH',owner='authorization')
     approved=not bool(candidate)
     if approved and json.loads((directory/'approval.json').read_text())['content_sha256']!=digest:raise V2Stop('APPROVAL_HASH_MISMATCH',owner='authorization')
     return SkillSnapshot(content.decode('utf-8'),digest,meta,approved=approved)
 
 
-def save_whatsapp_candidate(lesson,*,run_id,parent,task_digest,evidence_refs,payload,ui):
+def save_whatsapp_candidate(lesson,*,run_id,parent,task_digest,evidence_refs,payload,ui,ga_binding_evidence=None,ga_switch_only=False):
     from uuid import uuid4
     from modules.whatsapp.contract import V2Stop
     if not re.fullmatch('[a-f0-9]{32}',run_id):raise V2Stop('INVALID_SOURCE_ITERATION')
@@ -291,7 +304,16 @@ def save_whatsapp_candidate(lesson,*,run_id,parent,task_digest,evidence_refs,pay
         return None
     if not lesson.safe_next_iteration or not lesson.instructions:return None
     if not set(lesson.evidence_refs)<=set(evidence_refs):raise V2Stop('TEACHER_CITATIONS_INVALID')
-    text=whatsapp_procedure_text(lesson.instructions,ui)
+    ga_binding = any(step.when=='ga_scoped_control_bound' for step in lesson.instructions)
+    if ga_binding:
+        from modules.whatsapp.ga_teacher_evidence import adjacent_utms_observed, scoped_ga_switch_observed
+
+        validate = scoped_ga_switch_observed if ga_switch_only else adjacent_utms_observed
+        if (ga_switch_only and any(step.when=='ga_scoped_control_bound' and step.field!='ga_tracking' for step in lesson.instructions)
+                or not ga_binding_evidence or not validate(ga_binding_evidence['result']) or
+                ga_binding_evidence['id'] not in lesson.evidence_refs):
+            raise V2Stop('TEACHER_GA_ADJACENT_BINDING_EVIDENCE_REQUIRED')
+    text=whatsapp_procedure_text(lesson.instructions,ui,ga_switch_only=ga_switch_only)
     if re.search(r'https?://|querySelector|document\.|locator\(|```',text):raise V2Stop('UNSUPPORTED_CANDIDATE_CODE_OR_SELECTORS')
     if any(isinstance(v,str) and len(v)>=8 and v in text+'\n'+lesson.change_summary for v in payload.model_dump().values()):
         raise V2Stop('TASK_VALUES_MUST_NOT_ENTER_SKILL')
@@ -307,6 +329,9 @@ def save_whatsapp_candidate(lesson,*,run_id,parent,task_digest,evidence_refs,pay
         'task_sha256':task_digest,'source_iteration_id':run_id,'evidence_refs':lesson.evidence_refs,
         'change_summary':lesson.change_summary,'status':'UNAPPROVED_PENDING_EXECUTION','approved':False,
         'live_verified':False,'loaded_by':[],'procedures':[step.model_dump() for step in lesson.instructions]}
+    if ga_binding:
+        metadata['ga_binding_basis']='SCOPED_TRACKING_SWITCH' if ga_switch_only else 'ADJACENT_EXACT_ANGULAR_KEYS'
+        metadata['ga_binding_evidence_ref']=ga_binding_evidence['id']
     # Persist exactly the bytes hashed above. Windows text newline conversion
     # otherwise produces a candidate that fails its own immutable reload check.
     (directory/'SKILL.md').write_bytes(content.encode('utf-8'))

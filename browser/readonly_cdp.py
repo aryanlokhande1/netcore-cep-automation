@@ -20,11 +20,12 @@ class ReadOnlyCommandError(RuntimeError):
 
 
 class ReadOnlyCDP:
-    def __init__(self,observer,diagnostic=None):
+    def __init__(self,observer,diagnostic=None,*,browser_errors=False):
         self.observer=observer;self.ws=None;self.reader=None;self.pending={};self.serial=0
         self.closed=False;self.failure=None
         self.ready=False
         self.diagnostic=diagnostic;self.active_sessions=set()
+        self.browser_errors=browser_errors
     def record(self,state,**data):
         if self.diagnostic:self.diagnostic('READONLY_CDP',{'state':state,**data})
     async def start(self,cdp_url,target_ids):
@@ -45,6 +46,9 @@ class ReadOnlyCDP:
             self.active_sessions.add(attached['sessionId'])
             self.record('TARGET_ATTACHED')
             await self.send('Network.enable',{'maxTotalBufferSize':1048576,'maxResourceBufferSize':262144,'maxPostDataSize':0},attached['sessionId'])
+            if self.browser_errors:
+                await self.send('Runtime.enable',session=attached['sessionId'])
+                await self.send('Log.enable',session=attached['sessionId'])
         if not self.active_sessions:raise RuntimeError('No owned live discovery target')
         self.ready=True
     async def send(self,method,params=None,session=None):
@@ -77,6 +81,9 @@ class ReadOnlyCDP:
                         else:future.set_result(event.get('result',{}))
                 elif event.get('method') in {'Network.requestWillBeSent','Network.responseReceived',
                         'Network.loadingFinished','Network.loadingFailed'}:
+                    self.observer(event)
+                elif self.browser_errors and event.get('method') in {
+                        'Runtime.exceptionThrown','Runtime.consoleAPICalled','Log.entryAdded'}:
                     self.observer(event)
                 elif event.get('method')=='Target.detachedFromTarget':
                     self.active_sessions.discard(event.get('params',{}).get('sessionId'))

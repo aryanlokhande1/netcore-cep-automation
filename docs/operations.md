@@ -143,3 +143,47 @@ staging directory, verify member hashes against manifest.json, and restore only
 reviewed paths. Private payloads/credentials/profiles are excluded. Do not overwrite
 later work or historical outputs. No Git repository was initialized and no commit
 was made.
+## Unattended WhatsApp draft runbook
+
+### Login and session handoff
+
+Run `app.cli whatsapp-human-assisted` with `--unattended-config`,
+`--unattended-payload`, `--login-evidence-file`, `--authorized-live`, and
+`--authorized-inference`. Use the approved Login bundle. The existing Login
+Doer calls `read_approved_skill`, `navigate_approved`, `inspect_page`, and
+`submit_login` through the broker. Allow one credential submission. The
+controller checks the approved HTTPS origin and tenant boundary, then runs
+`stable_authentication` on the current protected Login document. It requires
+the reviewed dashboard marker, exact tenant, and authenticated read-only
+access, then binds the current owned tab and browser session. A missing or
+unreviewed contract stops before Chromium. A failed live predicate, challenge,
+redirect to sign-in, or changed tab/session stops before campaign edits.
+
+### WhatsApp draft and verification
+
+For `READ_DRAFT`, use the exact ID and payload name. `reconcile_campaign`
+reads a current authorized record view or first checks the visible Drafts or
+Campaigns table. It prefers the visible matching ID and name, otherwise it
+waits for a usable Search control and exact result. It opens only an observed
+read-only Preview link. `DETAIL` reads visible identity, explicit Draft
+status, and the Send later date, time, and timezone. A same-record Draft badge
+counts. A toast or a route alone is insufficient. `Asia/Calcutta` and
+`Asia/Kolkata` are equivalent for matching.
+
+For `SAVE_AND_PREVIEW`, the controller first requires a completed exact-name
+search with an explicit zero-result state. A blank, busy, inaccessible, or
+ambiguous list blocks Setup. The launch grant replaces the terminal write
+approval. `run_page1_fields` and `run_campaign_fields` reuse deterministic
+readbacks for Setup, Audience, and Content. `ScheduleDraft.apply` verifies
+Send later and the applied form and summary. `ScheduleDraft.save_and_preview`
+claims the single attempt in the mounted output directory before clicking.
+Use the rendered exact name, campaign ID, explicit Draft status, and persisted
+Send later date, time, and timezone to verify success. If Preview lacks a
+required value, use the existing read-only list fallback. Leave an uncertain
+save unconfirmed and retain the claim for read-only reconciliation. Do not
+repeat the save or schedule delivery, activate, publish, or send.
+
+Unattended runs skip tenant, name, draft, and review-hold prompts. The process
+exits successfully only after the required draft readback and owned-browser
+cleanup. The interactive entry points continue to use terminal confirmation.
+See [Local Docker](local-docker.md) for the exact launch.

@@ -7,7 +7,15 @@ from modules.whatsapp.contract import GoalFinding,STAGE_FIELDS,V2Stop
 async def deterministic_readback(tools,fields=None,*,operator_details=False):
     """Read actual properties, not the Doer's node descriptions or success report."""
     document=await tools.protect()
-    fields=STAGE_FIELDS[tools.stage] if fields is None else fields
+    ga_fields = getattr(tools, 'ga_setup_fields', None)
+    campaign_name_only = tools.stage == 'setup' and getattr(tools, 'mcp_campaign_name_write', False)
+    if fields is None:
+        if campaign_name_only:
+            fields = ('campaign_name',)
+        elif tools.stage == 'setup' and getattr(tools, 'mcp_ga_switch_only', False):
+            fields = ('ga_tracking',)
+        else:
+            fields = ga_fields or STAGE_FIELDS[tools.stage]
     available=[k for k in fields if k in tools.ui.fields and (k in tools.reviewed_fields or k in tools.observed_bindings)]
     for field in available:await tools.verify_binding(field)
     settings={'stage':tools.ui.stage_selectors.get(tools.stage),
@@ -21,6 +29,9 @@ async def deterministic_readback(tools,fields=None,*,operator_details=False):
     settings['campaign_stage'] = tools.stage
     settings['audience_option'] = getattr(tools, 'audience_option', None)
     settings['operator_details'] = operator_details
+    settings['capture_campaign_name_state'] = tools.stage == 'setup' and getattr(tools, 'mcp_discovery', False)
+    settings['ga_fields'] = ga_fields or ()
+    settings['capture_campaign_name_value'] = campaign_name_only
     if tools.stage == 'audience' and settings['campaign_walkthrough']:
         for key in ('include_audience', 'exclude_audience'):
             if key in available:
@@ -29,7 +40,7 @@ async def deterministic_readback(tools,fields=None,*,operator_details=False):
       const one=q=>{if(!q)return null;const a=document.querySelectorAll(q);return a.length===1?a[0]:null};
       const visible=e=>!!e&&e.getClientRects().length>0&&getComputedStyle(e).visibility!=='hidden';
       const norm=x=>String(x??'').replace(/\s+/g,' ').trim();
-      const stage=one(s.stage),result={},sets={};
+      const stage=one(s.stage),result={},sets={},gaReadback={},observedStates={};
       for(const [key,b] of Object.entries(s.fields)){
         const e=one(b.selector),wanted=s.expected[key];let ok=false;
         if(e&&stage&&stage.contains(e)&&visible(e)){
@@ -39,6 +50,7 @@ async def deterministic_readback(tools,fields=None,*,operator_details=False):
               (key==='ga_tracking'&&role==='switch'&&e.type!=='submit'))?
               (e.getAttribute('aria-checked')==='true'?true:e.getAttribute('aria-checked')==='false'?false:null):null;
             ok=typeof checked==='boolean'&&checked===wanted;
+            if(s.ga_fields.includes(key)&&typeof checked==='boolean')gaReadback[key]=checked;
           }
           else if(b.kind==='radio'){
             const checked=e.type==='radio'?e.checked:e.getAttribute('role')==='radio'?e.getAttribute('aria-checked')==='true':false;
@@ -46,7 +58,15 @@ async def deterministic_readback(tools,fields=None,*,operator_details=False):
               (e.getAttribute('aria-labelledby')||'').split(/\s+/).map(id=>document.getElementById(id)?.textContent||'').join(' ')||e.textContent||'';
             ok=checked===true&&(norm(e.value)===wanted||norm(label)===wanted);
           }
-          else if(b.kind==='text')ok=['INPUT','TEXTAREA'].includes(e.tagName)&&e.value===wanted;
+          else if(b.kind==='text'){
+            const readable=['INPUT','TEXTAREA'].includes(e.tagName);
+            ok=readable&&e.value===wanted;
+            if(readable&&key==='campaign_name'&&s.capture_campaign_name_state){
+              observedStates[key]={state:e.value===''?'EMPTY':'NONEMPTY',payload_match:ok};
+              if(s.capture_campaign_name_value&&(ok||e.value===''))
+                observedStates[key].value=e.value;
+            }
+          }
           else if(b.kind==='native_select'){
             const selected=e.tagName==='SELECT'?[...e.selectedOptions]:[];
             ok=selected.length===1&&(selected[0].value===wanted||norm(selected[0].textContent)===wanted);
@@ -85,10 +105,21 @@ async def deterministic_readback(tools,fields=None,*,operator_details=False):
           }
         }
         result[key]=ok;
+        if(ok&&key.startsWith('utm_')&&s.ga_fields.includes(key))gaReadback[key]=e.value;
       }
-      return {stage_visible:visible(stage),fields:result,selected_sets:sets};
+      return {stage_visible:visible(stage),fields:result,selected_sets:sets,
+              ...(s.capture_campaign_name_state?{observed_states:observedStates}:{}),
+              ...(s.ga_fields.length?{ga_readback:gaReadback}:{})};
     })(SETTINGS)'''
     state=await tools.browser.page.evaluate(script.replace('SETTINGS',json.dumps(settings)))
+    if campaign_name_only:
+        from hashlib import sha256
+
+        observed_name = state.get('observed_states', {}).get('campaign_name', {})
+        if 'value' in observed_name:
+            # Fingerprint the actual UI value without logging raw text.
+            actual = observed_name.pop('value')
+            observed_name['value_sha256'] = sha256(actual.encode('utf-8')).hexdigest()
     state['fields']={k:state['fields'].get(k,False) for k in fields}
     terminal_details = {key: proof.pop('terminal_unexpected') for key, proof in state.get('selected_sets', {}).items()
                         if 'terminal_unexpected' in proof}
@@ -135,7 +166,7 @@ async def deterministic_readback(tools,fields=None,*,operator_details=False):
     state['evidence_ref']=tools.browser.trace.agent_event('deterministic_readback',
         role='observer' if tools.browser.trace.agent_phase=='observer' else 'doer',result=state)
     if tools.stage == 'setup':
-        if fields == STAGE_FIELDS['setup']:
+        if fields == (ga_fields or STAGE_FIELDS['setup']):
             tools.last_independent_readback = state
         else:
             prior = getattr(tools, 'last_independent_readback', {})
@@ -145,13 +176,17 @@ async def deterministic_readback(tools,fields=None,*,operator_details=False):
     return state
 
 
-async def observe_goal(tools,model,trace,budget,previous,*,force_interpretation=False,prior_facts=None):
+async def observe_goal(tools,model,trace,budget,previous,*,force_interpretation=False,prior_facts=None,mcp_client=None):
     from deepagents import create_deep_agent
     from deepagents.backends import StateBackend
     from langchain.agents.structured_output import ProviderStrategy
     from deep_agents.permissions import PermissionMiddleware,restrict_harness
-    current_observation=await tools.observe()
-    facts=await deterministic_readback(tools)
+    if mcp_client is None:
+        current_observation=await tools.observe()
+        facts=await deterministic_readback(tools)
+    else:
+        current_observation=await mcp_client.read('browser_observe')
+        facts=await mcp_client.read('independent_readback')
     complete=facts['stage_visible'] and all(facts['fields'].values()) and all(facts['checks'].values())
     if tools.stage=='preview':complete=complete and facts.get('saved_draft_verified') is True
     ids=[e['id'] for e in tools.events[-12:]]
@@ -164,7 +199,7 @@ async def observe_goal(tools,model,trace,budget,previous,*,force_interpretation=
         blocker_category=None,evidence_refs=ids)
     # Ordinary successful clicks do not require an extra LLM call. Milestones and
     # uncertain/blocked interactions do. No model interpretation can override facts.
-    if not complete and not force_interpretation:
+    if mcp_client is not None or not complete and not force_interpretation:
         trace.agent_event('observer_readback',role='observer',mode='DETERMINISTIC_ONLY',verdict=finding.model_dump(),checks=facts)
         return finding,facts
     trace.agent_event('observer_invocation',role='observer',goal=tools.stage,

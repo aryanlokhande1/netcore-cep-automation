@@ -7,9 +7,9 @@ from deep_agents.permissions import restrict_harness, PermissionMiddleware
 from deep_agents.schemas import DoerReport
 
 
-def create_doer(model,browser_tools,trace,budget,offline=False,skill_snapshot=None,candidate_evaluation=False):
+def create_doer(model,browser_tools,trace,budget,offline=False,skill_snapshot=None,candidate_evaluation=False,*,mcp_tools=None):
     restrict_harness(model)
-    tools=browser_tools.registered_tools()
+    tools=browser_tools.registered_tools() if mcp_tools is None else mcp_tools
     backend=StateBackend()
     sources=None
     if skill_snapshot is not None:

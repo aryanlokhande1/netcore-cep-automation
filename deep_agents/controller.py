@@ -92,7 +92,8 @@ async def capture_verification(browser,tools,result):
         result['reason_code']='NAVIGATION_GUARD_UNAVAILABLE' if browser.guard.failed else 'UNAPPROVED_ORIGIN_APPROVAL_REQUIRED'
 
 
-async def _execute_doer(browser,tools,task,model,budget,offline,skill_snapshot=None,candidate_evaluation=False,hold_seconds=0,diagnostics=False,*,after_login=None,login_timeout=None,close_session=True):
+async def _execute_doer(browser,tools,task,model,budget,offline,skill_snapshot=None,candidate_evaluation=False,hold_seconds=0,diagnostics=False,*,after_login=None,after_browser_start=None,login_timeout=None,close_session=True,login_scope=None):
+    from contextlib import nullcontext
     trace=browser.trace
     result={'run_id':trace.run_id,'mode':'offline' if offline else 'openai','mocked':offline,
         'verification':str(Result.NOT_TESTED),'agent_report':None,'teacher_proposal':None,
@@ -100,6 +101,8 @@ async def _execute_doer(browser,tools,task,model,budget,offline,skill_snapshot=N
     try:
         async with asyncio.timeout(login_timeout or browser.config.timeout_seconds):
             await browser.start()
+            if after_browser_start is not None:
+                await after_browser_start(browser)
             if getattr(browser,'evidence_review',False) or getattr(browser, 'login_calibration', False):
                 try:
                     from browser.discovery import ReadOnlyDiscovery
@@ -109,13 +112,15 @@ async def _execute_doer(browser,tools,task,model,budget,offline,skill_snapshot=N
                     from browser.evidence_diagnostics import evidence_diagnostic,review_event
                     print(json.dumps(review_event(browser,'DISCOVERY',evidence_diagnostic(error,'DISCOVERY',browser))),flush=True)
                     # Keep the monitor for bounded cleanup even after partial initialization.
-            agent,permissions=create_doer(model,tools,trace,budget,offline=offline,
-                skill_snapshot=skill_snapshot,candidate_evaluation=candidate_evaluation)
             context={'entry_url':tools.entry_url,'strategy':getattr(tools,'strategy',None).model_dump() if hasattr(tools,'strategy') else None}
             context_name='APPROVED_SYNTHETIC_CONTEXT' if browser.fixture else 'APPROVED_LIVE_CONTEXT'
             user_message=task+'\n\n'+context_name+'\n'+json.dumps(context)
-            state=await agent.ainvoke({'messages':[{'role':'user','content':user_message}]},
-                {'configurable':{'thread_id':trace.run_id},'recursion_limit':100})
+            async with (login_scope() if login_scope else nullcontext()) as client:
+                agent,permissions=create_doer(model,tools,trace,budget,offline=offline,
+                    skill_snapshot=skill_snapshot,candidate_evaluation=candidate_evaluation,
+                    **({'mcp_tools':client.agent_tools(image_content=False)} if client else {}))
+                state=await agent.ainvoke({'messages':[{'role':'user','content':user_message}]},
+                    {'configurable':{'thread_id':trace.run_id},'recursion_limit':100})
             report=state.get('structured_response')
             if report is None:
                 raise RuntimeError('MISSING_STRUCTURED_REPORT')
@@ -141,6 +146,8 @@ async def _execute_doer(browser,tools,task,model,budget,offline,skill_snapshot=N
         from deep_agents.permissions import model_failure_details
         diagnostic=next((d for d in reversed(trace.model_diagnostics) if d.get('role')=='doer'),{})
         details=model_failure_details(error,diagnostic);details['failure_phase']='login_doer'
+        if login_scope and str(getattr(error, 'code', '')).startswith('MCP_'):
+            details['code'] = error.code
         trace.add('error',error='MODEL')
         result['error']=details['code'] if details['code']!='MODEL_OR_CONTROLLER_EXCEPTION' else 'EXECUTION_BLOCKED'
         result['execution_failure']=details

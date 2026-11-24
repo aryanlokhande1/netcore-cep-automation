@@ -1,6 +1,13 @@
 """Private light-DOM node identity, independent of model references/selector text."""
 from modules.whatsapp.contract import SetupStop
 from browser.protected_tabs import bound_tab_observable
+from browser.navigation_guard import GuardProtocolError
+
+
+def lost_observed_node(error):
+    cause = error.__cause__
+    return (isinstance(error, SetupStop) and error.code == 'CONTROL_IDENTITY_UNAVAILABLE'
+            and isinstance(cause, GuardProtocolError) and cause.protocol_reason == 'NODE_ID_NOT_FOUND')
 
 
 def protected_document(browser):
@@ -25,6 +32,7 @@ async def observed_node(browser,selector):
         if protected_document(browser)!=before:raise SetupStop('SETUP_DOCUMENT_CHANGED')
         return (*before,backend)
     except SetupStop:raise
+    except GuardProtocolError as error:raise SetupStop('CONTROL_IDENTITY_UNAVAILABLE') from error
     except Exception:raise SetupStop('CONTROL_IDENTITY_UNAVAILABLE') from None
 
 
